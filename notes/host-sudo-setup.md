@@ -22,9 +22,14 @@ Wayland globals per uid. Key points for us:
   needs it), `code` gets it.
 - Virtual keyboard, input method, virtual pointer, screencopy, data-control are denied to non-root.
   So input spoofing against a root-owned prompt isn't available to sandboxed uids.
+- `ext_session_lock_manager_v1` should be denied to every non-root uid (default-deny, but
+  **unverified** — check it isn't in the base set). A uid holding it can lock the session, which
+  blocks `sudo-prompt` entirely and puts an uncoverable surface on screen.
 
-Layer shell lets `sudo-prompt` cover the desktop rather than use an `xdg_toplevel`; it has no
-xdg-toplevel fallback.
+`sudo-prompt` covers the desktop with an `ext-session-lock-v1` surface (via `gtk4-session-lock`)
+rather than an `xdg_toplevel`, and has no fallback — not even to layer shell, which non-root uids
+can draw over. The generic presenter picks session lock → layer shell → toplevel, which on this
+host means a toplevel for everyone but root.
 
 ## sudo chain (pre-`permission-prompt`)
 

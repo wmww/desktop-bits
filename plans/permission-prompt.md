@@ -1,7 +1,8 @@
 # Plan: permission prompt
 
 Replace the zenity/bash sudo authorization prompt in ~/playground/personal/desktop/ with a Rust
-GTK4 + layer-shell gate. See notes/host-sudo-setup.md for the host integration.
+GTK4 gate that presents on a session-lock surface. See notes/host-sudo-setup.md for the host
+integration.
 
 ## Threat model
 
@@ -20,10 +21,15 @@ synthesizing input — only by tricking the human's own press. XWayland clients 
 to other X clients, never to the gate's Wayland surfaces.
 
 Goal: no command runs as root unless a human saw its argv on a root-owned surface and approved it.
-Caveat: today ff/comms/code hold `zwlr_layer_shell_v1` and can draw over the prompt
-(issues/overlay-layer-spoofing.md), so the guarantee is only as strong as that layer's trust until
-the issue is fixed. Fixing it is out of scope for this plan. The gate, not sudoers, decides which
-command runs; sudoers only decides who may raise a prompt.
+The gate presents on a session-lock surface (`ext-session-lock-v1`), which the compositor renders
+above every other client and routes all input to, so the layer-shell overlay spoofing of
+issues/overlay-layer-spoofing.md cannot reach it. What replaces that concern: any uid able to bind
+`ext_session_lock_manager_v1` gets the same exclusivity. It cannot cover a live prompt — only one
+lock exists at a time, so it must take the lock *first*, and then the gate fails closed and never
+prompts — and there is no secret to phish, since the gate takes no password. But a fake prompt on
+screen plus a gate that cannot run is bad enough: wlbouncer must deny that global to every non-root
+uid (see the verify list). The gate, not sudoers, decides which command runs; sudoers only decides
+who may raise a prompt.
 
 **This design requires a root password and a usable console/TTY login.** The gate is the only path
 through sudo — there is no password fallback rule and no TTY fallback in the gate. If the GUI is
@@ -35,16 +41,22 @@ Accepted, out of scope for this pass:
 - A compromised root, and pkexec (see issues/pkexec-root-prompt.md).
 - Denial of service, deliberately: there is no prompt timeout once the prompt is answerable (only a
   cap on *settling*, which denies — see UI behavior). A stuck or spammed prompt blocks all sudo, and
-  because the overlay holds exclusive keyboard it can also make the session unusable until
-  dismissed. That includes an unattended agent request sitting on the lock: the overlay is
-  on screen and Escape dismisses it, so a stuck prompt is impossible to miss. Recovery is a root
-  TTY. Wayland disconnect, compositor exit, and any internal error are denials.
-- A request raised while the session is locked. `ext-session-lock-v1` surfaces render above the
-  overlay layer and take all input, so the prompt is invisible and unanswerable until unlock, and
-  the request simply waits (holding the lock, so sudo is blocked meanwhile). Accepted. What must
-  not happen is the prompt being *already live* when it becomes visible, so the settle quiet period
-  — and its cap — restarts whenever the surface regains keyboard focus (see UI behavior).
-- Visual spoofing by uids that hold `zwlr_layer_shell_v1` — see issues/overlay-layer-spoofing.md.
+  because the gate holds the session lock it also hides the desktop and takes all input until
+  dismissed. That includes an unattended agent request sitting on the gate lock: the prompt is on
+  screen and Escape dismisses it, so a stuck prompt is impossible to miss. Recovery is a root TTY.
+  Wayland disconnect, compositor exit, and any internal error are denials.
+- A gate killed with SIGKILL, or crashing hard enough to skip its unlock, leaves the compositor's
+  session locked with no client — a blank or placeholder screen that no keystroke dismisses. This is
+  the cost of session-lock mode and it is accepted; recovery is the root TTY this design already
+  requires (see Session lock mode). Every survivable exit path unlocks first.
+- A request raised while another client already holds the session lock. Only one lock exists at a
+  time, so the gate's lock request fails and it exits 125 without prompting: sudo does not work
+  while the screen is locked, and such a request fails fast instead of parking on the gate lock.
+  That is a change from the layer-shell design, where the request waited invisibly, and it is the
+  better direction — nobody is there to answer it.
+- Visual spoofing by uids that hold `zwlr_layer_shell_v1` (issues/overlay-layer-spoofing.md). It no
+  longer reaches the gate, which is session-lock only, but it still reaches the generic presenter in
+  layer mode, and the generic presenter is not an authorization boundary anyway.
 - An Enter held down from before the prompt cannot approve by itself: a key held across focus
   produces no fresh key down, and even if a backend ever delivered repeats for one, repeats are
   input — they restart the settle period and hit the cap, a denial, rather than approving (see UI
@@ -67,7 +79,8 @@ Use two executables sharing Rust UI code but not a security contract:
   theme, or config options.
 
 This split is required. A sudoers-approved binary with arbitrary prompt options lets a requester
-disable the settle delay/dimming or narrate a privileged action as something harmless. The generic
+disable the settle delay or pick a weaker surface, or narrate a privileged action as something
+harmless. The generic
 presenter cannot safely be that executable.
 
 ## Authority model
@@ -102,7 +115,7 @@ agent uid `ai`. Membership is the whole security boundary: every member can rais
 any moment, and the only defence left is the human reading it.
 
 `ai` is in the group deliberately — an agent asking for root and a human approving it on the
-overlay is a supported flow, and it is the same flow the human's own sudo takes. Consequences to
+prompt is a supported flow, and it is the same flow the human's own sudo takes. Consequences to
 accept: an agent request blocks the gate lock until someone answers it, and the prompt's uid field
 is the only thing separating "I typed this" from "the agent typed this", so it must be prominent
 and never adjacent to caller-controlled text. Anything that must fail fast instead of waiting for a
@@ -114,7 +127,7 @@ real sudo and is denied immediately (see the shim's flag classification).
 Use a workspace with a small shared UI crate and three binaries:
 
 ~~~
-permission-prompt-ui/       # GTK/layer-shell primitives; internal workspace API
+permission-prompt-ui/       # GTK + surface-mode primitives; internal workspace API
 permission-prompt/          # generic yes/no presenter
 sudo-prompt/                # fixed sudo gate
 sudo-shim/                  # unprivileged /usr/local/bin/sudo dispatcher
@@ -130,17 +143,22 @@ sudo-prompt constructs its presentation in code. Do not expose a reusable Prompt
 to it. Test seams belong behind cfg(test) or a test-only Cargo feature not enabled in the installed
 binary; no production test display, environment override, or alternate lock path.
 
-The UI crate supports three surface modes — `Layer`, `Toplevel`, and `Auto` (layer shell if the
-compositor advertises `zwlr_layer_shell_v1`, else an xdg toplevel). The gate compiles in `Layer`
-and has no way to select another; missing layer shell stays an error for it. The generic binary
-defaults to `Auto` and can be pinned with `--surface=auto|layer|toplevel`. This is the surface
-type only; it is unrelated to which Wayland socket is chosen, which the gate decides separately
-and the generic binary inherits from its own session. Auto matters on this host because wlbouncer
-denies `zwlr_layer_shell_v1` to most uids, so a layer-only generic presenter would be unusable for
-`play`, `ai`, and anything else outside the `ff`/`comms`/`code` set.
+The UI crate supports four surface modes — `SessionLock`, `Layer`, `Toplevel`, and `Auto`, where
+Auto tries them in exactly that order: session lock if the compositor offers
+`ext-session-lock-v1`, else layer shell if it offers `zwlr_layer_shell_v1`, else an xdg toplevel.
+The gate compiles in `SessionLock` and has no way to select another; a missing session lock
+protocol is an error for it, with no downgrade to layer shell (see Session lock mode). The generic
+binary defaults to `Auto` and can be pinned with `--surface=auto|session-lock|layer|toplevel`. This
+is the surface type only; it is unrelated to which Wayland socket is chosen, which the gate decides
+separately and the generic binary inherits from its own session. Auto matters on this host because
+wlbouncer denies `zwlr_layer_shell_v1` to most uids — and must deny `ext_session_lock_manager_v1`
+to all of them — so for `play`, `ai` and anything else outside the `ff`/`comms`/`code` set, Auto
+falls all the way through to a toplevel.
 
-Use gtk4, gtk4-layer-shell, log, env_logger, and Rust/libc filesystem APIs. Use clap only for the
-generic executable; the gate's tiny CLI parser and the shim should be manual.
+Use gtk4, gtk4-layer-shell, gtk4-session-lock, log, env_logger, and Rust/libc filesystem APIs. Use
+clap only for the generic executable; the gate's tiny CLI parser and the shim should be manual.
+gtk4-session-lock binds the same C library as gtk4-layer-shell and needs it at ≥ 1.1.0, so it is
+one extra system dependency version, not a new one.
 
 ## Sudo shim and sudoers
 
@@ -299,7 +317,7 @@ Exit status: on approval the gate exec()s, so the command's own status or signal
 Denial exits 125 with exactly `User denied sudo :(` on stderr. Any operational error exits 125
 with a specific message naming the failed check.
 
-Compile conservative fixed values: heading, dim alpha, settle duration and settle cap, the
+Compile conservative fixed values: heading, backdrop appearance, settle duration and settle cap, the
 passthrough variable list, lock path /run/sudo-prompt.lock, and display root /run/user/0. The
 release binary requires euid 0; nested-compositor tests exercise the UI crate or a test-only build.
 
@@ -321,7 +339,7 @@ initialization or threads:
    display selection has validated that directory. Set XDG_RUNTIME_DIR explicitly rather than
    leaving it unset: GLib otherwise falls back to a cache-directory runtime path, and GTK, dconf
    and the cursor cache all land somewhere unintended.
-4. Initialize GTK and layer shell from this clean state.
+4. Initialize GTK and take the session lock from this clean state.
 
 Never configure root GTK from caller GTK_THEME, GTK_MODULES, GIO_MODULE_DIR, XDG_DATA_DIRS, runtime,
 or display variables.
@@ -386,13 +404,16 @@ Before GTK initialization, inspect only /run/user/0:
    interop makes that awkward, fall back to setting WAYLAND_DISPLAY=<name>; that is safe only
    because /run/user/0 is drwx-----x root:root so no non-root uid can replace the entry between
    check and connect. Write that dependency down next to the code either way.
-5. After connecting, require zwlr_layer_shell_v1. Missing layer shell is an error.
+5. After connecting, require `ext-session-lock-v1` — `gtk4_session_lock::is_supported()`, which
+   costs a Wayland roundtrip on first call, so do it once and keep the answer. Missing session lock
+   is an error; the gate does not fall back to layer shell or a toplevel.
 
 The connection must not survive the approval exec. Step 4 deliberately clears FD_CLOEXEC and
 libwayland does not necessarily restore it, so the approved command would otherwise inherit an open,
 root-authenticated connection to root's compositor — and wlbouncer filters globals per uid at
-connect time, so an inherited root connection carries virtual keyboard, virtual pointer, screencopy
-and layer shell into a command that may be running as `ff` or `play`. That is exactly the capability
+connect time, so an inherited root connection carries virtual keyboard, virtual pointer, screencopy,
+layer shell and the session lock manager into a command that may be running as `ff` or `play`. That
+is exactly the capability
 set the sandbox policy denies them. Immediately before the exec, re-set FD_CLOEXEC on the Wayland fd
 (and close the display outright when GTK allows it), then walk /proc/self/fd and close or
 CLOEXEC everything above fd 2 — GLib, dconf and GIO hold fds of their own, so "assert nothing above
@@ -458,8 +479,11 @@ rather than remembering not to do it:
   format string, concatenated with trusted prose, or passed anywhere expecting `&str`. The single
   way to get it on screen is one UI-crate function that escapes it and calls `set_text`.
 - That function, and every other label constructor in the crate, sets `use_markup = false` and
-  `use_underline = false` explicitly, and sets tooltips and accessible descriptions from the same
-  escaped text. No `set_markup` call, no `<property name="use-markup">` in any builder XML.
+  `use_underline = false` explicitly, and sets accessible descriptions from the same escaped text.
+  No `set_markup` call, no `<property name="use-markup">` in any builder XML.
+- Nothing the human must read may live in a popup, menu or tooltip: `ext-session-lock-v1` allows one
+  surface per output, so GTK popups silently do not appear in session-lock mode. Everything is in
+  the one window, which the scrolling overflow-marked viewports below already assume.
 - Trusted fields — heading, uid/name, interpreter, verdict, buttons — are compiled-in constants
   rendered by their own functions, never concatenated with `Untrusted` content and never adjacent
   to it in a way that lets caller text appear to be part of them.
@@ -537,7 +561,9 @@ command path the gate resolved itself. After approval:
    nothing else works. Skip empty path elements rather than treating them as the current directory,
    matching sudo's `ignore_dot` default. There is no ENOEXEC fallback to a shell: a file with no
    shebang is an error, because this design never invokes a shell.
-3. Re-arm FD_CLOEXEC on the Wayland fd, close everything above fd 2, and `execve`.
+3. Unlock the session and wait for the compositor to acknowledge it (see Session lock mode) —
+   before, not after, the connection is torn down.
+4. Re-arm FD_CLOEXEC on the Wayland fd, close everything above fd 2, and `execve`.
 
 Do not use `execvp`/`execvpe` and do not write the final environment into `environ`. `execvp`
 resolves against the live `environ`, so it would require rewriting `environ` at approval time —
@@ -553,17 +579,18 @@ Execution failure is an error (exit 125 with the errno), not approval.
 
 ## UI behavior
 
-The gate pins the UI crate's `Layer` surface mode: a compositor-managed, full-output overlay, never
-an xdg toplevel, with no fallback.
+The gate pins the UI crate's `SessionLock` surface mode: `ext-session-lock-v1` surfaces covering
+every output, never a layer surface and never an xdg toplevel, with no fallback.
 
-- Create exactly one overlay-layer surface per output, anchored on all edges with exclusive zone
-  -1. Every surface dims its output AND carries an identical dialog instance — there is no
-  pointer/focus output selection and no reparenting. Do not stack overlay surfaces on an output.
-- Every surface requests exclusive keyboard interactivity; whichever the compositor focuses drives
-  the shared decision, as do the buttons on any surface. Every surface sets an opaque input region
-  so stray clicks cannot reach the apps beneath. There are no focusable GTK widgets, no default
-  action, and no IM context, so nothing but the state machine below can turn a keystroke into an
-  activation.
+- Exactly one window per output, handed to the compositor with `assign_window_to_monitor` before it
+  is presented. Every window carries an identical dialog instance over an opaque compiled-in
+  backdrop — there is no pointer/focus output selection and no reparenting. Nothing is dimmed,
+  because a lock surface replaces the desktop rather than sitting over it; that is also why the
+  backdrop is opaque rather than translucent.
+- The compositor routes all input to lock surfaces, so there is no exclusive-keyboard request to
+  make and no input region to set. Whichever window the compositor focuses drives the shared
+  decision, as do the buttons on any of them. There are no focusable GTK widgets, no default action,
+  and no IM context, so nothing but the state machine below can turn a keystroke into an activation.
 - Settling is a quiet period, not a fixed window. Ignore all input and visibly disable the controls
   until the settle duration has passed with no key press, key release or pointer button event; each
   of those restarts the timer. Start it from the first frame callback — the moment a surface is
@@ -572,8 +599,8 @@ an xdg toplevel, with no fallback.
   (re)gains keyboard focus. A fixed window from mapping is not enough: a fast typist mid-sentence
   hits Enter well inside a second and approves something they never read; if the outputs are
   DPMS-blanked the whole window can elapse while nothing is visible, so the very keypress that
-  wakes the display approves an invisible prompt; and a prompt raised behind a session lock must
-  not be live the instant the lock goes away.
+  wakes the display approves an invisible prompt; and a prompt whose focus the compositor moved
+  away and back must not be live the instant it returns.
 - Two deliberate details in that rule. Pointer *motion* does not restart the timer, only buttons: a
   drifting mouse, a resting touchpad finger or a VM absolute pointer emits motion continuously, and
   with no prompt timeout a motion-sensitive quiet period would mean a prompt that can never settle
@@ -581,9 +608,9 @@ an xdg toplevel, with no fallback.
   of the settle duration, counted from when the current quiet period began; on reaching the cap the
   gate **denies** and exits 125 with its own message, rather than enabling the controls. The cap
   restarts only with the non-input restarts (focus regain, a newly presenting surface), never on an
-  input event — that is what lets a prompt raised behind a session lock, or on an output that wakes
-  late, survive to be answered, while a stuck key stays bounded. Enabling the controls at the cap
-  would hand approval to whatever is generating the input; denying fails closed, and costs a
+  input event — that is what lets a prompt on an output that wakes late, or one the compositor
+  refocused, survive to be answered, while a stuck key stays bounded. Enabling the controls at the
+  cap would hand approval to whatever is generating the input; denying fails closed, and costs a
   genuine fast typist nothing but a retry. This is a cap on *settling*, not on deliberation: once
   settled the prompt waits indefinitely for an answer.
 - Approval requires a physical key press: the first real key *down* — never a synthesized
@@ -595,24 +622,60 @@ an xdg toplevel, with no fallback.
   window level and never reaches a control, and pointer approval requires a press *delivered after*
   settling ends: a press that began before settling and is held across the boundary does nothing,
   even if its release lands on Approve.
-- Handle hotplug: create a surface for new outputs, remove disappeared ones. If no outputs remain,
-  deny and exit; likewise deny if there were none to begin with, rather than sitting invisibly on
-  the lock.
+- Handle hotplug through the instance's `monitor` signal, which fires for every monitor present when
+  the lock is taken and for each one that appears while it is held: assign a fresh window to each,
+  and drop the window for a monitor that goes away. If no monitors remain, deny and exit; likewise
+  deny if there were none to begin with, rather than holding the session lock and the gate's flock
+  with nothing on screen.
 - Keep the fixed trusted heading, requesting uid/name, requested command, command environment, and
   cwd as separate fields. Caller-controlled text never occupies the trusted verdict field, and the
   uid/name field never sits where caller text could be read as part of it — with `ai` in the group,
   that field is what distinguishes an agent's request from the human's own.
 
-Acquire the fixed lock before mapping. /run is tmpfs, so the file will not exist after a boot: open
-it with O_CREAT|O_NOFOLLOW|O_CLOEXEC and mode 0600, then fstat and require root ownership, a
-regular file, and no group/other write. Creating it is safe without an installer or a tmpfiles.d
-entry because /run itself is root-owned and only root-writable, so no other uid can win the race or
-plant a symlink. Take a non-blocking exclusive flock. A concurrent request fails closed; do not
-queue overlays, accept an alternate lock, or continue unlocked. flock lives on the open file
-description, so the kernel releases it on any exit including SIGKILL — no PID file or stale-lock
-recovery is needed. Do not block or ignore SIGINT, SIGTERM or SIGHUP; treat all three as denial
-(SIGHUP is the normal outcome of the requesting terminal going away while the prompt is up), and
-keep the fd CLOEXEC so an approved long-running command does not hold the lock.
+### Session lock mode
+
+Use gtk4-session-lock: `is_supported()` during display selection, then `Instance::new()`, `lock()`,
+one window per monitor from the `monitor` signal, and `unlock()` when the decision is made. Keep the
+instance alive for the whole run.
+
+- **This is not a lock screen.** The gate takes no password and authenticates nobody; it uses the
+  protocol purely for exclusivity — a surface no other client can cover, that receives all input.
+  Either verdict unlocks. The prompt must therefore not look like a lock screen: anyone who walks up
+  can press Escape and land on the unlocked desktop, and the session is no more protected while the
+  prompt is up than it was a moment before. Nothing here replaces or interacts with the real lock.
+- Order: flock, then display selection, then `lock()`, then windows. Present nothing before the
+  compositor confirms with `locked` — a lock surface exists only inside the lock.
+- `failed` is a denial, not a fallback trigger: log it and exit 125. Its normal cause is another
+  client already holding the lock, i.e. the screen is locked. Same for the compositor withdrawing
+  the lock under us.
+- Every survivable exit path unlocks *and waits for the compositor to process the unlock* (a
+  roundtrip, not just a flush) before tearing anything down: approval before the exec, denial, the
+  settle cap, the SIGINT/SIGTERM/SIGHUP handlers, and every operational error after `lock()`
+  succeeded. Dropping the connection while locked is precisely how the compositor learns a lock
+  client died, and it keeps the session locked with nothing on it. The exec path is the sharp edge —
+  it closes every fd by design, so the unlock must have completed, not merely been queued.
+- Install a panic hook that unlocks and roundtrips, and do not build with `panic = "abort"`. A panic
+  in a GTK callback would otherwise strand the session.
+- What remains: SIGKILL, the OOM killer, a real crash. Those leave the session locked with no
+  client, and no in-process design fixes that. Recovery is the root TTY this design already requires
+  — from there restart the compositor, or run another lock client to take over and unlock. Establish
+  which of those works on this host's sway *before* rollout and write it into the recovery docs. The
+  same risk is the reason to keep the code running between `lock()` and `unlock()` small.
+- No downgrade to layer shell when the protocol is missing. A silent downgrade would hand back the
+  exact spoofing exposure session lock was chosen to remove, at the one moment nobody is watching
+  for it. Compositor support is a static property of the host, checked at install.
+
+Acquire the flock before taking the session lock. /run is tmpfs, so the file will not exist after a
+boot: open it with O_CREAT|O_NOFOLLOW|O_CLOEXEC and mode 0600, then fstat and require root
+ownership, a regular file, and no group/other write. Creating it is safe without an installer or a
+tmpfiles.d entry because /run itself is root-owned and only root-writable, so no other uid can win
+the race or plant a symlink. Take a non-blocking exclusive flock. A concurrent request fails closed;
+do not queue prompts, accept an alternate lock path, or continue without it. flock lives on the open
+file description, so the kernel releases it on any exit including SIGKILL — no PID file or
+stale-lock recovery is needed (unlike the session lock, which is exactly the opposite). Do not block
+or ignore SIGINT, SIGTERM or SIGHUP; treat all three as denial (SIGHUP is the normal outcome of the
+requesting terminal going away while the prompt is up), and keep the fd CLOEXEC so an approved
+long-running command does not hold the flock.
 
 Log one escaped record per decision — requesting uid/name, display identity, rendered command, and
 approve/deny/error — to stderr via env_logger, and additionally best-effort to the systemd journal
@@ -623,20 +686,30 @@ decision.
 ## Generic permission-prompt
 
 The generic binary may accept title, body, repeatable details, icon, normal session-display
-selection, and `--surface=auto|layer|toplevel` (default auto: layer shell when the compositor
-offers it, xdg toplevel otherwise). It exits 0 approved, 1 denied, 3 operational error (it is not a
-sudo wrapper, so no exit-status collision exists); it has no -- ARGV execution mode and no sudoers
-rule.
+selection, and `--surface=auto|session-lock|layer|toplevel`, default auto: session lock, then layer
+shell, then an xdg toplevel. It exits 0 approved, 1 denied, 3 operational error (it is not a sudo
+wrapper, so no exit-status collision exists); it has no -- ARGV execution mode and no sudoers rule.
+
+In practice auto lands on a toplevel for most uids, because wlbouncer denies both the session lock
+manager and layer shell to them — the ordering matters for the uids that do hold those globals, and
+today that is root. All the session-lock rules above apply to it unchanged, and two of them bite
+harder here: it must unlock on every exit path, and a crash strands the session locked. So it gets
+the same panic hook and the same signal handling as the gate, and a caller that would rather have a
+plain window than that failure mode should pass `--surface=toplevel`. Being unprivileged, it is also
+the binary most likely to be run where it cannot lock at all; `failed` there falls through to the
+next mode rather than exiting, since it is not a security boundary and has nothing to fail closed
+about.
 
 It must visually quarantine caller prose and escape unsafe text through the same `Untrusted` path
 and the same scrolling, overflow-marked viewports as the gate, but it must not claim to be a
-trusted sudo/root prompt, and should be visually distinct from the gate. It can link the same Rust
-UI code, but the sudo gate must not delegate to it over argv, environment, socket, or config file.
+trusted sudo/root prompt, and should be visually distinct from the gate — and, in session-lock mode,
+from a lock screen. It can link the same Rust UI code, but the sudo gate must not delegate to it
+over argv, environment, socket, or config file.
 
-## Verify on the target sudo
+## Verify on the target host
 
-Check before relying on any of it, and again if the host switches to sudo-rs, which supports a
-subset of sudoers:
+Check before relying on any of it, and check the sudo items again if the host switches to sudo-rs,
+which supports a subset of sudoers:
 
 - The command-argument wildcard rule parses and matches as intended: `sudo-prompt -- id` matches,
   and both bare `sudo-prompt id` and bare `sudo-prompt --` match nothing.
@@ -651,7 +724,19 @@ subset of sudoers:
   dev.tty.legacy_tiocsti=0 as a second layer.
 - wlbouncer policy still denies virtual-keyboard, input-method and virtual-pointer globals to every
   non-root uid: the approval guarantee assumes no untrusted uid can synthesize input to the
-  overlay.
+  prompt.
+- wlbouncer denies `ext_session_lock_manager_v1` to every non-root uid — it is denied by default,
+  but confirm it is not in the base set and is not granted alongside layer shell to
+  `ff`/`comms`/`code`. A non-root uid holding it can lock the session before the gate does, which
+  both blocks all sudo and puts an uncoverable fake prompt on screen.
+- The compositor implements `ext-session-lock-v1` (sway does) and
+  `gtk4_session_lock::is_supported()` returns true as root on this host. The gate has no fallback,
+  so this is a hard install-time requirement, and gtk4-layer-shell must be ≥ 1.1.0 for the binding
+  to exist at all.
+- Recovery from an abandoned lock is known and written down: kill a locked-but-clientless session
+  from the root TTY by restarting the compositor, or by running another lock client that takes over
+  and unlocks. Test it deliberately (SIGKILL the gate mid-prompt) before rollout, not during an
+  incident.
 - SUDO_UID is set by sudo and reflects the real caller.
 - A `root ALL=(ALL:ALL) ALL` style rule exists, so the interpreter path's inner sudo (running as
   uid 0) can run commands as other users. sudo never authenticates uid 0, so no NOPASSWD is needed
@@ -667,10 +752,10 @@ subset of sudoers:
 ## Milestones
 
 1. **Build the fixed gate.** Display selection and fd hygiene, the constructed command environment
-   and assignments, safe non-blocking lock, overlays with per-output dialogs, quiet-period settling
-   and the key state machine, hotplug, the `Untrusted` rendering path with scrolling overflow-marked
-   fields, the interpreter whitelist, the single resolve-and-execve path, exit statuses, and
-   logging.
+   and assignments, safe non-blocking flock, the session lock with per-monitor dialogs and its
+   unlock-on-every-path discipline, quiet-period settling and the key state machine, hotplug, the
+   `Untrusted` rendering path with scrolling overflow-marked fields, the interpreter whitelist, the
+   single resolve-and-execve path, exit statuses, and logging.
 2. **Integrate sudo.** sudo-shim binary, narrow sudoers group/drop-in, installer path-integrity
    checks, recovery docs, and the verification list above.
 3. **Add the generic presenter.** Keep it unprivileged and execution-free.
@@ -723,7 +808,7 @@ subset of sudoers:
 - Approved commands inherit nothing they shouldn't: approve `/usr/bin/ls -l /proc/self/fd` on both
   the plain and interpreter paths and confirm only 0/1/2 (plus the pty) are open — specifically no
   Wayland fd — and that WAYLAND_SOCKET/WAYLAND_DISPLAY are absent from the command's environment.
-- GUI test-only nested compositor: dim+dialog on every output; early Enter, Escape, and button
+- GUI test-only nested compositor: backdrop+dialog on every output; early Enter, Escape, and button
   input being ignored; key/button input during settling restarting the timer while pointer motion
   does not; the settle cap denying rather than enabling the controls under continuous key input;
   the *first* post-settle Enter press approving (not the second), from any surface, and Escape
@@ -732,18 +817,26 @@ subset of sudoers:
   producing no press event and no approval, with release-then-press then approving; focus
   leave/enter with the key down not producing an approval and restarting the quiet period; a newly
   presenting surface (hotplug add, late-waking output) restarting the quiet period, and the cap
-  restarting on focus regain so a prompt that settled behind a session lock survives to be
-  answered; a small output and a large text scale still showing heading, uid field and buttons;
-  hotplug add/remove, last-output loss and zero outputs at startup; concurrent lock failure;
-  SIGINT/SIGTERM/SIGHUP denying and releasing the lock; missing layer shell; wrong display
-  ownership; stale-socket failure. Surface modes: the generic binary falling back to a toplevel
-  with no layer shell, and the gate refusing to.
+  restarting on focus regain so a prompt whose focus came back survives to be answered; a small
+  output and a large text scale still showing heading, uid field and buttons; hotplug add/remove,
+  last-monitor loss and zero monitors at startup; concurrent flock failure;
+  SIGINT/SIGTERM/SIGHUP denying and releasing both locks; wrong display ownership; stale-socket
+  failure.
+- Session lock, in the nested compositor: the lock is taken before anything is presented and the
+  session is left *unlocked* after approve, deny, settle-cap denial, each of the three signals, and
+  an induced operational error — check the compositor's state, not just the exit code, and check it
+  after an approved exec rather than only after a denial, since that is the path that closes the
+  connection. `lock()` failing because another client holds the lock exits 125 without prompting;
+  a missing `ext-session-lock-v1` is an error for the gate with no layer-shell fallback; a panic
+  injected into a GTK callback still unlocks; SIGKILL mid-prompt leaves the session locked and the
+  documented recovery gets out of it. Surface modes: auto choosing session lock, then layer shell
+  with the lock manager absent, then a toplevel with neither, and each `--surface=` pinning holding.
 - Journal record present when systemd is running, absent and harmless otherwise.
 - Rollout sequencing, in order: confirm the root password works from a TTY; install binaries and
-  run the verify list; create the group with the human uid(s) and `ai`; ship the rule as a
-  validated /etc/sudoers.d drop-in; keep a root TTY logged in for the whole switch; prove the new
-  path end to end from both a human uid and `ai`; only then remove the zenity/bash chain, the old
-  %wheel rule, and the uids' now-pointless wheel membership.
+  run the verify list, including the abandoned-lock recovery drill; create the group with the human
+  uid(s) and `ai`; ship the rule as a validated /etc/sudoers.d drop-in; keep a root TTY logged in
+  for the whole switch; prove the new path end to end from both a human uid and `ai`; only then
+  remove the zenity/bash chain, the old %wheel rule, and the uids' now-pointless wheel membership.
 
 ## Out of scope
 
@@ -751,7 +844,11 @@ subset of sudoers:
 - PAM command discovery, sudo plugins, or replacing sudo uid transition.
 - pkexec, which is a separate ungated root path with a normal toplevel prompt.
 - Overlay-layer spoofing by layer-shell-holding uids (issues/overlay-layer-spoofing.md) and the
-  wlbouncer per-layer filter that would fix it.
+  wlbouncer per-layer filter that would fix it. Session-lock mode takes the gate out of its reach,
+  but the layer is still spoofable for anything else that uses it.
+- Being an actual lock screen. The gate takes the session lock for exclusivity only: no password, no
+  authentication, no idle handling, no interaction with the real locker beyond failing when one is
+  already running. Do not grow it into one.
 - sudoedit/-e (no supported path), full-environment preservation (-E), --chdir, compact option forms
   like -uff, and long-option abbreviations: deliberately unsupported rather than deferred features.
 - Filtering the assignments a request carries. There is no env_check/env_delete equivalent and

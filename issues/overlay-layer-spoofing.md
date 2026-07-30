@@ -1,29 +1,24 @@
-# Non-root uids can draw over the sudo prompt
+# Non-root uids can draw over an overlay-layer surface
 
-`plans/permission-prompt.md` assumes an overlay-layer surface is a trusted display. On this host it
-isn't: wlbouncer grants `zwlr_layer_shell_v1` to `ff`, `comms` and `code` (portal needs it), and
-stacking between two overlay-layer clients is compositor-defined.
+wlbouncer grants `zwlr_layer_shell_v1` to `ff`, `comms` and `code` (portal needs it), and stacking
+between two overlay-layer clients is compositor-defined. So a compromised browser uid can place its
+own overlay surface over another client's: cover the important text with something benign, leave the
+approve button exposed, and the human clicks. It cannot forge input (virtual keyboard, input method
+and virtual pointer are denied to non-root) but it does not need to.
 
-So a compromised browser uid can place its own overlay surface over a live root prompt: cover the
-command text with something benign, leave the approve button exposed, and the user approves the real
-request. It cannot forge input (virtual keyboard, input method and virtual pointer are denied to
-non-root) but it does not need to — the human clicks.
+**No longer applies to the sudo gate.** `plans/permission-prompt.md` now presents the gate on an
+`ext-session-lock-v1` surface, which the compositor renders above the overlay layer and gives all
+input to, so a layer-shell client cannot cover it. The gate has no layer-shell fallback. Cost: if
+the gate is SIGKILLed the session stays locked until recovered from a TTY.
 
-The attack needs the covering uid and the sudo-group uid to both be compromised, or to cooperate.
-Note the plan now keeps `ai` in the sudo-prompt group (agent sudo is an intended flow), and `ai` is
-the uid most exposed to untrusted input, so "a sudo-group uid does something the human didn't
-intend" is cheaper than it looks. `ai` has no layer shell, so it can raise the request but not do
-the covering.
+What is left:
 
-Options:
-
-- Teach wlbouncer to filter per layer, so only root gets `overlay`. Cleanest; needs a wlbouncer
-  change, since it currently filters globals only.
-- Drop layer shell for `ff`/`comms`/`code` and find another answer for the portal.
-- Use `ext-session-lock-v1` for the gate instead: the compositor guarantees exclusivity and routes
-  all input to the lock client. Downside is a hard failure mode — if the gate crashes, sway leaves
-  the session locked.
-- Accept it and rely on a root-only visual marker (a phrase or colour readable only from /root) so
-  a covered or faked prompt is distinguishable.
-
-Deferred deliberately for the first implementation pass.
+- The generic `permission-prompt` presenter in layer mode is still coverable. It is not an
+  authorization boundary, so this is minor.
+- The equivalent hazard moved up a protocol: a non-root uid that could bind
+  `ext_session_lock_manager_v1` would get the same exclusivity, could lock the session before the
+  gate does (blocking all sudo, since the gate fails closed) and could show an uncoverable fake
+  prompt. wlbouncer denies unknown globals by default; confirm that includes this one and that it is
+  never granted alongside layer shell.
+- Teaching wlbouncer to filter per layer (only root gets `overlay`) is still the clean general fix
+  for the layer itself, and would matter again for anything else that trusts an overlay surface.
