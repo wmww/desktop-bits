@@ -13,7 +13,11 @@ Adversary: a compromised non-root uid. Members of the sudo-prompt group can invo
 any argv they like. The group holds the human's login uid(s) and the agent uid `ai` (agent sudo is
 an intended use case, see Authority model), so a request may originate from semi-autonomous code
 the human did not type; the requesting uid is a first-class field in the prompt for that reason.
-Every uid can create ordinary windows, because wlbouncer grants `xdg_wm_base` to all.
+Every uid can create ordinary windows, because wlbouncer grants `xdg_wm_base` to all. It denies
+virtual-keyboard, input-method and virtual-pointer protocols to every non-root uid (see
+notes/host-sudo-setup.md) and the gate creates no IM context, so approval cannot be forged by
+synthesizing input — only by tricking the human's own press. XWayland clients can inject input only
+to other X clients, never to the gate's Wayland surfaces.
 
 Goal: no command runs as root unless a human saw its argv on a root-owned surface and approved it.
 Caveat: today ff/comms/code hold `zwlr_layer_shell_v1` and can draw over the prompt
@@ -39,12 +43,13 @@ Accepted, out of scope for this pass:
   overlay layer and take all input, so the prompt is invisible and unanswerable until unlock, and
   the request simply waits (holding the lock, so sudo is blocked meanwhile). Accepted. What must
   not happen is the prompt being *already live* when it becomes visible, so the settle quiet period
-  restarts whenever the surface regains keyboard focus (see UI behavior).
+  — and its cap — restarts whenever the surface regains keyboard focus (see UI behavior).
 - Visual spoofing by uids that hold `zwlr_layer_shell_v1` — see issues/overlay-layer-spoofing.md.
-- An Enter held down from before the prompt cannot approve by itself: GTK delivers no press event
-  for a key held across focus, a synthesized repeat is filtered because the keycode is already held,
-  and repeats would restart the settle period anyway (see UI behavior). So approval takes a fresh
-  physical press, and that one press is enough. An easy Enter is deliberate UX.
+- An Enter held down from before the prompt cannot approve by itself: a key held across focus
+  produces no fresh key down, and even if a backend ever delivered repeats for one, repeats are
+  input — they restart the settle period and hit the cap, a denial, rather than approving (see UI
+  behavior). So approval takes a fresh physical press, and that one press is enough. An easy Enter
+  is deliberate UX.
 - What the approved command then does, including a caller-writable `sudo ./script` changing between
   approval and exec. That ambiguity is inherent to sudo and is unchanged here.
 - A stale `wayland-N` socket from a dead compositor blocking display selection (see Display
@@ -501,7 +506,9 @@ and cannot stop an approved root command from reaching an editor by some other r
 authority model).
 
 Mark the request as an interpreter request with fixed compiled-in prose in a trusted field, and pick
-the prose from the whitelist scan's own result, not from the request text:
+the prose from the whitelist scan's own result, not from the request text. When `-i`/`-s` is present
+the interactive-shell warning always applies — combined with the `-u`/`-g` wording when both appear,
+since `sudo -u ff -i` is a shell as another user and still one that never prompts again:
 
 - `-u`/`-g` with an inner command: "this runs another sudo, as root, to run a command as another
   user".
@@ -559,42 +566,35 @@ an xdg toplevel, with no fallback.
   activation.
 - Settling is a quiet period, not a fixed window. Ignore all input and visibly disable the controls
   until the settle duration has passed with no key press, key release or pointer button event; each
-  of those restarts the timer. Start it from the first frame callback — the moment the surface is
-  actually presented, not when it was created — and restart it whenever a surface (re)gains keyboard
-  focus. A fixed window from mapping is not enough: a fast typist mid-sentence hits Enter well
-  inside a second and approves something they never read; if the outputs are DPMS-blanked the whole
-  window can elapse while nothing is visible, so the very keypress that wakes the display approves
-  an invisible prompt; and a prompt raised behind a session lock must not be live the instant the
-  lock goes away.
+  of those restarts the timer. Start it from the first frame callback — the moment a surface is
+  actually presented, not when it was created — and restart it whenever any surface presents for
+  the first time (a hotplugged or late-waking output must never show an already-live prompt) or
+  (re)gains keyboard focus. A fixed window from mapping is not enough: a fast typist mid-sentence
+  hits Enter well inside a second and approves something they never read; if the outputs are
+  DPMS-blanked the whole window can elapse while nothing is visible, so the very keypress that
+  wakes the display approves an invisible prompt; and a prompt raised behind a session lock must
+  not be live the instant the lock goes away.
 - Two deliberate details in that rule. Pointer *motion* does not restart the timer, only buttons: a
   drifting mouse, a resting touchpad finger or a VM absolute pointer emits motion continuously, and
   with no prompt timeout a motion-sensitive quiet period would mean a prompt that can never settle
   and therefore a system where sudo never works. And the settling wait is capped at a small multiple
-  of the settle duration, counted from the same first frame callback; on reaching the cap the gate
-  **denies** and exits 125 with its own message, rather than enabling the controls. Enabling them
-  would hand approval to whatever is generating the input; denying fails closed, bounds how long a
-  stuck key can hold the session, and costs a genuine fast typist nothing but a retry. This is a cap
-  on *settling*, not on deliberation: once settled the prompt waits indefinitely for an answer.
-- Approval requires a physical key press: the first Enter *press* after settling, never an
-  autorepeat. Wayland's core protocol never sends key repeats — wl_keyboard delivers only physical
-  press/release, and repeat is synthesized client-side from wl_keyboard.repeat_info (in GTK, in the
-  Wayland backend, which exposes no is-repeat flag on events). Reconstruct it with a
-  `GtkEventControllerKey` in the capture phase on each window plus `notify::is-active` for keyboard
-  focus:
-  - Keep a set of held *hardware keycodes*, initially empty. `key-pressed`/`key-released` both carry
-    the keycode; decide on the keyval (`Return`, `KP_Enter`, `ISO_Enter` approve, `Escape` denies)
-    but track held state by keycode, since a release can carry a different keyval if modifiers
-    changed in between.
-  - A press whose keycode is already in the set is a synthesized repeat: ignore it entirely. A
-    release removes the keycode. So only a press with no intervening release can approve.
-  - On losing keyboard focus, empty the set — the matching releases will never arrive — and mark the
-    surface unsettled. On regaining it, restart the quiet period.
-  - Starting empty, rather than assuming Enter is down, is what makes the *first* Enter press
-    approve, and it is safe: GTK only starts repeating keys it saw pressed after focus, so an Enter
-    held across surface mapping produces no press event at all and cannot approve; and if some
-    backend ever did deliver repeats for it, those repeats are input, so they would keep restarting
-    the quiet period and hit the cap — a denial — instead of approving. Assuming "down" would only
-    have cost the human an extra keypress. Verify both halves in the nested-compositor tests.
+  of the settle duration, counted from when the current quiet period began; on reaching the cap the
+  gate **denies** and exits 125 with its own message, rather than enabling the controls. The cap
+  restarts only with the non-input restarts (focus regain, a newly presenting surface), never on an
+  input event — that is what lets a prompt raised behind a session lock, or on an output that wakes
+  late, survive to be answered, while a stuck key stays bounded. Enabling the controls at the cap
+  would hand approval to whatever is generating the input; denying fails closed, and costs a
+  genuine fast typist nothing but a retry. This is a cap on *settling*, not on deliberation: once
+  settled the prompt waits indefinitely for an answer.
+- Approval requires a physical key press: the first real key *down* — never a synthesized
+  autorepeat — on Enter (`Return`, `KP_Enter`, `ISO_Enter`) while settled approves, and `Escape`
+  denies. wl_keyboard delivers only physical press/release; repeats are synthesized client-side (in
+  GTK's Wayland backend, with no is-repeat flag on events), so telling a fresh down from a repeat is
+  the implementor's problem — held-keycode tracking with focus-leave resets is the expected shape,
+  but the contract is the sentences above. Input delivered before settling ends is swallowed at the
+  window level and never reaches a control, and pointer approval requires a press *delivered after*
+  settling ends: a press that began before settling and is held across the boundary does nothing,
+  even if its release lands on Approve.
 - Handle hotplug: create a surface for new outputs, remove disappeared ones. If no outputs remain,
   deny and exit; likewise deny if there were none to begin with, rather than sitting invisibly on
   the lock.
@@ -649,6 +649,9 @@ subset of sudoers:
 - use_pty is on, so the approved command does not share the caller's terminal, where another
   process of the caller's uid could inject input into it via TIOCSTI. Check
   dev.tty.legacy_tiocsti=0 as a second layer.
+- wlbouncer policy still denies virtual-keyboard, input-method and virtual-pointer globals to every
+  non-root uid: the approval guarantee assumes no untrusted uid can synthesize input to the
+  overlay.
 - SUDO_UID is set by sudo and reflects the real caller.
 - A `root ALL=(ALL:ALL) ALL` style rule exists, so the interpreter path's inner sudo (running as
   uid 0) can run commands as other users. sudo never authenticates uid 0, so no NOPASSWD is needed
@@ -724,14 +727,17 @@ subset of sudoers:
   input being ignored; key/button input during settling restarting the timer while pointer motion
   does not; the settle cap denying rather than enabling the controls under continuous key input;
   the *first* post-settle Enter press approving (not the second), from any surface, and Escape
-  denying; a synthesized autorepeat run never approving; an Enter held across surface mapping
+  denying; a pointer press begun during settling and released over Approve after settling not
+  activating; a synthesized autorepeat run never approving; an Enter held across surface mapping
   producing no press event and no approval, with release-then-press then approving; focus
-  leave/enter with the key down not producing an approval and restarting the quiet period; a small
-  output and a large text scale still showing heading, uid field and buttons; hotplug add/remove,
-  last-output loss and zero outputs at startup; concurrent lock failure; SIGINT/SIGTERM/SIGHUP
-  denying and releasing the lock; missing layer shell; wrong display ownership; stale-socket
-  failure. Surface modes: the generic binary falling back to a toplevel with no layer shell, and
-  the gate refusing to.
+  leave/enter with the key down not producing an approval and restarting the quiet period; a newly
+  presenting surface (hotplug add, late-waking output) restarting the quiet period, and the cap
+  restarting on focus regain so a prompt that settled behind a session lock survives to be
+  answered; a small output and a large text scale still showing heading, uid field and buttons;
+  hotplug add/remove, last-output loss and zero outputs at startup; concurrent lock failure;
+  SIGINT/SIGTERM/SIGHUP denying and releasing the lock; missing layer shell; wrong display
+  ownership; stale-socket failure. Surface modes: the generic binary falling back to a toplevel
+  with no layer shell, and the gate refusing to.
 - Journal record present when systemd is running, absent and harmless otherwise.
 - Rollout sequencing, in order: confirm the root password works from a TTY; install binaries and
   run the verify list; create the group with the human uid(s) and `ai`; ship the rule as a
