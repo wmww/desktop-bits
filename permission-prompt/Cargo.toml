@@ -1,0 +1,12 @@
+[package]
+name = "permission-prompt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+permission-prompt-ui = { path = "../permission-prompt-ui" }
+clap = { version = "4", features = ["derive"] }
+log = { workspace = true }
+env_logger = { workspace = true }

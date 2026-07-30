@@ -1,0 +1,10 @@
+# /etc/sudoers.d/sudo-prompt — the human's login uid(s) and ai, nobody else.
+#
+# One pattern, because every gate invocation — plain or interpreter — starts with `--`. sudoers
+# joins the user's arguments with spaces and fnmatches the pattern against the result, and `*`
+# matches spaces, so `--` followed by at least one argument matches. The pattern deliberately does
+# *not* match a bare `sudo-prompt --`: fnmatch needs the literal space.
+#
+# Do not use a bare command path, which would permit arbitrary gate arguments. SETENV is not needed
+# and must not be granted: the caller's environment must not be able to reach the gate's own.
+%sudo-prompt-users ALL=(root) NOPASSWD: /usr/local/bin/sudo-prompt -- *

@@ -1,0 +1,29 @@
+[package]
+name = "sudo-prompt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Relaxes the euid-0 requirement and allows the runtime dir and lock path to be overridden, so the
+# UI can be driven in a nested compositor. Never enabled in the installed binary.
+test-seams = []
+
+[lib]
+name = "sudo_prompt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sudo-prompt"
+path = "src/main.rs"
+
+[dependencies]
+permission-prompt-ui = { path = "../permission-prompt-ui" }
+gtk = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

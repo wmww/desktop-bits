@@ -6,9 +6,9 @@ own overlay surface over another client's: cover the important text with somethi
 approve button exposed, and the human clicks. It cannot forge input (virtual keyboard, input method
 and virtual pointer are denied to non-root) but it does not need to.
 
-**No longer applies to the sudo gate.** `plans/permission-prompt.md` now presents the gate on an
-`ext-session-lock-v1` surface, which the compositor renders above the overlay layer and gives all
-input to, so a layer-shell client cannot cover it. The gate has no layer-shell fallback. Cost: if
+**No longer applies to the sudo gate.** `sudo-prompt` presents on an `ext-session-lock-v1` surface,
+which the compositor renders above the overlay layer and gives all input to, so a layer-shell client
+cannot cover it. The gate has no layer-shell fallback. Cost: if
 the gate is SIGKILLed the session stays locked until recovered from a TTY.
 
 What is left:

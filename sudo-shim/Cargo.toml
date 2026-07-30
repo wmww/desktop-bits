@@ -1,0 +1,25 @@
+[package]
+name = "sudo-shim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# /usr/local/bin/sudo. Runs as the untrusted caller, is not a security boundary, and deliberately
+# has no dependencies at all.
+
+[[bin]]
+name = "sudo-shim"
+path = "src/main.rs"
+
+[lib]
+name = "sudo_shim"
+path = "src/lib.rs"
+
+[features]
+# Lets an integration test point the exec at a fake sudo. Never enabled in the installed binary.
+test-exec-override = []
+
+[dev-dependencies]
+sudo-prompt = { path = "../sudo-prompt" }
+tempfile = "3"

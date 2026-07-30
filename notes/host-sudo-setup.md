@@ -26,10 +26,10 @@ Wayland globals per uid. Key points for us:
   **unverified** — check it isn't in the base set). A uid holding it can lock the session, which
   blocks `sudo-prompt` entirely and puts an uncoverable surface on screen.
 
-`sudo-prompt` covers the desktop with an `ext-session-lock-v1` surface (via `gtk4-session-lock`)
-rather than an `xdg_toplevel`, and has no fallback — not even to layer shell, which non-root uids
-can draw over. The generic presenter picks session lock → layer shell → toplevel, which on this
-host means a toplevel for everyone but root.
+`sudo-prompt` covers the desktop with an `ext-session-lock-v1` surface (via `gtk4-session-lock`,
+which needs gtk4-layer-shell ≥ 1.2.0) rather than an `xdg_toplevel`, and has no fallback — not even
+to layer shell, which non-root uids can draw over. The generic presenter picks session lock → layer
+shell → toplevel, which on this host means a toplevel for everyone but root.
 
 ## sudo chain (pre-`permission-prompt`)
 
