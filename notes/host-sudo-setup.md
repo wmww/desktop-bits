@@ -20,8 +20,11 @@ Wayland globals per uid. Key points for us:
 - Everyone gets a base set (`xdg_wm_base`, `wl_shm`, …) — so **any uid can make windows**.
 - `zwlr_layer_shell_v1` is denied by default; `root` gets everything; `ff`/`comms` get it (portal
   needs it), `code` gets it.
-- Virtual keyboard, input method, virtual pointer, screencopy, data-control are denied to non-root.
-  So input spoofing against a root-owned prompt isn't available to sandboxed uids.
+- Virtual keyboard, input method, virtual pointer and data-control are denied to every non-root uid,
+  so input spoofing against a root-owned prompt isn't available to sandboxed uids. Screencopy is
+  denied in the base set but **granted to `ff` and `comms`** (they need it for
+  xdg-desktop-portal-wlr), so those two uids can read the gate's prompt off the screen. Reading is
+  not approving, so the guarantee holds, but the prompt is not confidential from them.
 - `ext_session_lock_manager_v1` should be denied to every non-root uid (default-deny, but
   **unverified** — check it isn't in the base set). A uid holding it can lock the session, which
   blocks `sudo-prompt` entirely and puts an uncoverable surface on screen.

@@ -11,7 +11,7 @@ permission-prompt-ui/   GTK + surface-mode primitives; internal workspace API
 sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its parsers)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-install/                verify script + sudoers drop-in (installing itself is manual, see README)
+verify.sh               read-only check of a deployed setup (setup itself is manual, see README)
 tests/gui-test.sh       19 behavioural checks in a nested sway
 ~~~
 
@@ -23,10 +23,11 @@ Trusted: the kernel; root, including the compositor, which runs as root; `/usr/b
 sudoers evaluation; root-owned binaries and every directory on their path; the human reading the
 prompt.
 
-Adversary: a compromised non-root uid. Members of `sudo-prompt-users` can invoke the gate with any
-argv they like, and that group holds the human's login uid(s) **and the agent uid `ai`** — so a
-request may originate from semi-autonomous code the human did not type. The requesting uid is a
-first-class trusted field for that reason.
+Adversary: a compromised non-root uid. Members of the sudo group can invoke the gate with any argv
+they like, and on this host that group is `wheel`, holding the human's login uid(s), the sandboxed
+`code` uid **and the agent uid `ai`** — so a request may originate from semi-autonomous code the
+human did not type. The requesting uid is a first-class trusted field for that reason. Note `wheel`
+is a conventional group: `usermod -aG wheel` now grants gate access as a side effect.
 
 Every uid can make ordinary windows (wlbouncer grants `xdg_wm_base` to all). It denies
 virtual-keyboard, input-method and virtual-pointer to every non-root uid, and the gate creates no IM

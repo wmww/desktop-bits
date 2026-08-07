@@ -6,5 +6,6 @@
 - `permission-prompt.md` — design record for the `permission-prompt`/`sudo-prompt` workspace: threat
   model, why the binaries are split, the shim's classification, the gate's two environments,
   rendering safety, the input state machine, and the session-lock discipline.
-- `sudo-prompt-operations.md` — installing it, the verify list for the host, the abandoned-lock
-  recovery drill, and what is still untested because it needs root.
+- `sudo-prompt-operations.md` — rollout order, the verify items `verify.sh` does *not* cover, the
+  abandoned-lock recovery drill, and what is still untested because it needs root. The setup steps
+  themselves live in the repo README.
