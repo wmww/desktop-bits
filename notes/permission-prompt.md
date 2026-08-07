@@ -9,9 +9,9 @@ manual verification items and the recovery drill.
 ~~~
 permission-prompt-ui/   GTK + surface-mode primitives; internal workspace API
 sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its parsers)
+sudo-prompt/verify.sh   read-only check of a deployed setup (setup itself is manual, see README)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-verify.sh               read-only check of a deployed setup (setup itself is manual, see README)
 tests/gui-test.sh       19 behavioural checks in a nested sway
 ~~~
 

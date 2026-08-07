@@ -23,10 +23,10 @@ Around that:
 
 1. Confirm the root password works from a TTY. Everything below assumes that escape hatch.
 2. Install the binaries. Nothing about `sudo` changes yet — callers still reach `/usr/bin/sudo`.
-3. Add the sudoers rule, then `./verify.sh`. It warns about the missing `/usr/local/bin/sudo`
+3. Add the sudoers rule, then `sudo-prompt/verify.sh`. It warns about the missing `/usr/local/bin/sudo`
    symlink at this point, which is expected. Then work the manual list below.
 4. Run the abandoned-lock recovery drill.
-5. Create the symlink. This is the switch. Re-run `./verify.sh`.
+5. Create the symlink. This is the switch. Re-run `sudo-prompt/verify.sh`.
 6. Prove the new path end to end from a human uid **and** from `ai`.
 7. Only then remove whatever chain this replaces and any rule that bypasses the gate. `verify.sh`
    warns about leftover `NOPASSWD` entries and about other sudoers lines naming the gate, which is
