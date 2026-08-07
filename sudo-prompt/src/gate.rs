@@ -97,7 +97,8 @@ pub fn run() -> Fail {
     match verdict {
         Verdict::Approved => {
             // Resolve against the PATH of the *final* environment: the request's `PATH=`
-            // assignment if it carried one, else the captured secure_path.
+            // assignment if it carried one — which the prompt showed — else the gate's own
+            // root-controlled list. Never an inherited value.
             let path_var = env.get(b"PATH").unwrap_or_default().to_vec();
             let resolved = match exec::resolve(&req.command, &path_var) {
                 Ok(r) => r,

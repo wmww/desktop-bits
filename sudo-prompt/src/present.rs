@@ -113,10 +113,7 @@ mod tests {
     fn render(argv: &[&str]) -> Rendered {
         let req = cli::parse(&argv.iter().map(OsString::from).collect::<Vec<_>>()).unwrap();
         let prov = Provenance { uid: 1006, gid: 1007, user: b"ai".to_vec() };
-        let cap = crate::envsetup::Captured {
-            secure_path: Some(b"/usr/bin".to_vec()),
-            ..crate::envsetup::Captured::default()
-        };
+        let cap = crate::envsetup::Captured::default();
         let env = crate::cmdenv::build(&cap, &req, &prov, b"/bin/bash");
         let interp = crate::interp::is_interpreter(&req)
             .then(|| crate::interp::scan(&req.args).unwrap());

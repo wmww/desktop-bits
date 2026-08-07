@@ -20,5 +20,6 @@ rollout order, the manual verification items and the abandoned-lock recovery dri
   - `ln -s /usr/local/bin/sudo-shim /usr/local/bin/sudo`
 4. Add `%wheel ALL=(root) NOPASSWD: /usr/local/bin/sudo-prompt -- *` to `/etc/sudoers` (assuming `wheel` is your sudo group)
 5. Get rid of anything else in `/etc/sudoers` that allows sudo from untrusted users
-6. Check it with `./verify.sh` as root (`--group NAME` if your sudo group isn't `wheel`). It reads
-   only, and exits non-zero if anything is wrong.
+6. Check it with `./verify.sh` as root (`--group NAME` if your sudo group isn't `wheel`,
+   `--trusted NAME` for any uid that is meant to hold unrestricted root). It reads only, and exits
+   non-zero if anything is wrong.

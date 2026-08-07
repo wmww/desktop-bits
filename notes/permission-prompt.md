@@ -144,8 +144,8 @@ resolve → fd hygiene → `execve`.
 sudoers setting removes, and HOME and TERM in it are the *caller's* values. So sudo cannot hand
 either environment over clean and the gate builds both itself.
 
-The **gate's own**: capture `PATH` (secure_path), `SUDO_UID`/`SUDO_GID`/`SUDO_USER` and the
-passthrough candidates, `clearenv`, then set only `HOME=/root`, a fixed PATH, system data dirs and
+The **gate's own**: capture `SUDO_UID`/`SUDO_GID`/`SUDO_USER` and the passthrough candidates,
+`clearenv`, then set only `HOME=/root`, a fixed PATH, system data dirs and
 `LANG=C.UTF-8`; `XDG_RUNTIME_DIR` and `WAYLAND_SOCKET` come later, after display selection validated
 the directory. `XDG_RUNTIME_DIR` is set explicitly rather than left unset, because GLib otherwise
 falls back to a cache-directory runtime path and GTK, dconf and the cursor cache land somewhere
@@ -153,13 +153,23 @@ unintended. Never configure root's GTK from caller `GTK_THEME`, `GTK_MODULES`, `
 `XDG_DATA_DIRS`, runtime or display variables. `envsetup.rs` is the only module allowed to touch
 `environ`, and a source lint enforces it.
 
-The **command's** is constructed from exactly three things: a root-controlled base (secure_path,
-`HOME=/root`, `USER`/`LOGNAME=root`, root's passwd shell); a short validated passthrough list
+The **command's** is constructed from exactly three things: a root-controlled base (a fixed
+`COMMAND_PATH`, `HOME=/root`, `USER`/`LOGNAME=root`, root's passwd shell); a short validated
+passthrough list
 (`TERM`, `COLORTERM`, `LANG`, `LANGUAGE`, `LC_*` — a value failing a bounded-length, conservative
 charset check is dropped, never sanitized); and the request's assignments, applied last. Then the
 gate sets `SUDO_UID`/`GID`/`USER`/`COMMAND` itself so provenance cannot be rewritten. `TERM` is on
 the list because without it every interactive root command is unusable; `TERMINFO`, `TERMCAP` and
 `TERMPATH` are not.
+
+**PATH is never inherited.** `env_reset` preserves the *caller's* `PATH` unless `secure_path` is
+set, and the two arrive at the gate identically, so a gate reading the inherited value could not
+tell them apart — it would resolve the approved command against a caller-chosen list while the
+prompt named a bare `id`. Reading it at all made an external sudoers setting load-bearing for the
+prompt's honesty, so the gate reads neither and always uses `cmdenv::COMMAND_PATH`. A caller who
+wants a different PATH sends `PATH=…`, which arrives in argv and is shown in the Environment field
+like any other assignment. `secure_path` is still worth setting for sudo used outside the gate, but
+nothing here depends on it.
 
 Assignments are applied **without filtering** — a deliberate difference from stock sudo. There is no
 `env_check`/`env_delete` equivalent and `LD_PRELOAD` is not special-cased, so

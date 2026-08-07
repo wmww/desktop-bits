@@ -60,6 +60,12 @@ API — assume no sudo plugins either way.
 ## Misc facts checked 2026-07-27
 
 - `ai` (uid 1006) is in `wheel`, so the agent uid itself has the passwordless path to the gate.
+- `wheel` is `anon,code,install,ai,cal` (checked 2026-08-07), and `wheel` is the group the gate rule
+  names. Everyone in it can raise a root prompt with any argv. Worth periodically asking whether
+  `anon` and `cal` need it.
+- `install` holds `ALL=(ALL:ALL) NOPASSWD: ALL` by design — a second uid trusted with unrestricted
+  root, alongside root itself, and outside anything the gate covers. Pass it to `verify.sh` as
+  `--trusted install` so it is reported rather than counted as a bypass.
 - `/run/user/0` is `drwx-----x root root` — other uids can traverse in and open sockets by name,
   which is how `login-as-inner`'s symlinks work.
 - Non-root runtime dirs hold **real, non-root-owned** wayland sockets (`/run/user/1006/wayland-0`,

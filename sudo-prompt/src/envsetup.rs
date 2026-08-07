@@ -11,7 +11,7 @@
 
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-/// Fixed, root-controlled PATH for the gate itself. The command gets the captured secure_path.
+/// Fixed, root-controlled PATH for the gate itself. The command gets its own, see [`crate::cmdenv`].
 const GATE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Named passthrough candidates for the *command's* environment. TERM is here because without it
@@ -24,10 +24,12 @@ pub fn is_passthrough(name: &[u8]) -> bool {
 }
 
 /// Everything kept from the inherited environment. Not the whole environment.
+///
+/// PATH is deliberately absent: sudo's env_reset preserves the caller's PATH unless secure_path is
+/// set, and the gate cannot tell the two apart, so it reads neither and uses its own
+/// [`crate::cmdenv::COMMAND_PATH`] instead.
 #[derive(Debug, Default, Clone)]
 pub struct Captured {
-    /// PATH as sudo set it from secure_path.
-    pub secure_path: Option<Vec<u8>>,
     pub sudo_uid: Option<Vec<u8>>,
     pub sudo_gid: Option<Vec<u8>>,
     pub sudo_user: Option<Vec<u8>>,
@@ -41,7 +43,6 @@ pub fn capture() -> Captured {
         let name = name.into_vec();
         let value = value.as_bytes().to_vec();
         match name.as_slice() {
-            b"PATH" => cap.secure_path = Some(value),
             b"SUDO_UID" => cap.sudo_uid = Some(value),
             b"SUDO_GID" => cap.sudo_gid = Some(value),
             b"SUDO_USER" => cap.sudo_user = Some(value),

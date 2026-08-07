@@ -2,10 +2,11 @@
 # Verify a sudo-prompt setup against what the README describes. Reads only — this script changes
 # nothing. Run as root.
 #
-#   verify.sh [--group NAME] [--user NAME]...
+#   verify.sh [--group NAME] [--user NAME]... [--trusted NAME]...
 #
 # --group is the sudo group named in the sudoers rule (default wheel). With no --user it checks
-# every member of that group.
+# every member of that group. --trusted names a uid that is meant to hold unrestricted root, like
+# root itself; it is reported and then skipped rather than counted as a bypass of the gate.
 #
 # Exit 0 if every check passed, 1 if any FAILed. WARNs do not affect the exit status: they are
 # either host settings this repo does not own or states that are only wrong at the wrong moment.
@@ -25,15 +26,31 @@ fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); return 1; }
 ok()   { echo "ok:   $*"; return 0; }
 warn() { echo "WARN: $*" >&2; warns=$((warns + 1)); return 0; }
 
-usage() { sed -n '2,10p' "$0"; exit 2; }
+usage() { sed -n '2,11p' "$0"; exit 2; }
 
-# Every sudoers file, for the text searches below. visudo -c is what actually validates them.
+# version_ge A B — true if version A is at least version B.
+version_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]; }
+
+# Every sudoers file sudo actually reads, for the text searches below. visudo -c is what validates
+# them. Follows the includedir directives rather than assuming /etc/sudoers.d, so that a "setting
+# not found" verdict means it really is not set anywhere.
 sudoers_files() {
-    local -a files=(/etc/sudoers)
+    local -a out=(/etc/sudoers)
+    local -a dirs
+    local dir f
+    mapfile -t dirs < <(grep -hoE '^[@#]includedir[[:space:]]+[^[:space:]]+' /etc/sudoers 2>/dev/null | awk '{print $2}')
+    [[ -d /etc/sudoers.d ]] && dirs+=(/etc/sudoers.d)
     shopt -s nullglob
-    files+=(/etc/sudoers.d/*)
+    for dir in "${dirs[@]}"; do
+        for f in "$dir"/*; do
+            # sudo skips names containing a dot or ending in a tilde. Including them here would
+            # report a rule as installed when sudo never reads it.
+            [[ $(basename "$f") == *.* || $f == *~ ]] && continue
+            out+=("$f")
+        done
+    done
     shopt -u nullglob
-    printf '%s\n' "${files[@]}"
+    printf '%s\n' "${out[@]}" | sort -u
 }
 
 # --- path integrity ---------------------------------------------------------
@@ -139,19 +156,23 @@ check_host() {
     mapfile -t files < <(sudoers_files)
 
     # The approved command must not share the caller's terminal, where another process of the
-    # caller's uid could inject input into it via TIOCSTI.
-    if grep -qsE '^[^#]*Defaults.*\buse_pty\b' "${files[@]}"; then
+    # caller's uid could inject input into it via TIOCSTI. Nothing need be configured on a modern
+    # sudo — sudoers(5): "This flag is on by default for sudo 1.9.14 and above."
+    local pty_lines pty_off ver
+    pty_lines=$(grep -hsE '^[^#]*Defaults.*\buse_pty\b' "${files[@]}")
+    pty_off=$(grep '!use_pty' <<<"$pty_lines")
+    ver=$("$REAL_SUDO" -V 2>/dev/null | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
+    if [[ -n $pty_off ]]; then
+        fail "use_pty is explicitly disabled — the approved command would share the caller's terminal"
+    elif [[ -n $pty_lines ]]; then
         ok "use_pty is configured"
+    elif [[ -n $ver ]] && version_ge "$ver" 1.9.14; then
+        ok "use_pty is on by default (sudo $ver >= 1.9.14)"
     else
-        warn "use_pty not found in sudoers — set 'Defaults use_pty'"
+        warn "use_pty not set and sudo ${ver:-(version unknown)} predates the 1.9.14 default — set 'Defaults use_pty'"
     fi
-    # Without secure_path the gate captures a caller-chosen PATH and resolves the approved command
-    # against it, so the prompt could name `id` while root runs somebody else's.
-    if grep -qsE '^[^#]*Defaults.*\bsecure_path=' "${files[@]}"; then
-        ok "secure_path is configured"
-    else
-        warn "secure_path not found in sudoers — the gate's captured PATH would not be root-controlled"
-    fi
+    # Deliberately no secure_path check: the gate never reads its inherited PATH, so nothing here
+    # depends on it. It remains good hygiene for sudo used outside the gate.
     # The gate's rule carries no SETENV (it is implied only for a rule matching ALL), but a global
     # `Defaults setenv` would grant it anyway and let the caller hand the gate its own PATH.
     local setenv_lines
@@ -221,14 +242,36 @@ check_group() {
 
 # The rule must match a real request and neither of the two shapes that would widen it.
 check_matching() {
-    local user=$1 listing
+    local user=$1 listing others t
+    for t in "${trusted[@]}"; do
+        if [[ $user == "$t" ]]; then
+            # Declared as holding root by design, so the gate says nothing about it. Reported, not
+            # silently dropped: a trusted-uid list that grows unnoticed is the whole problem.
+            ok "$user: declared trusted with unrestricted root, gate checks skipped"
+            return
+        fi
+    done
+
     listing=$("$REAL_SUDO" -l -U "$user" 2>/dev/null) || warn "sudo -l -U $user failed; does $user exist?"
-    # Positive and negative argv matching, which is the check that actually matters.
+
     if "$REAL_SUDO" -l -U "$user" "$GATE" -- id >/dev/null 2>&1; then
         ok "$user: '$GATE -- id' matches"
     else
         fail "$user: '$GATE -- id' does not match the rule"
     fi
+
+    # The gate is only the sole path to root if nothing else is passwordless for this uid. A
+    # leftover rule from whatever chain this replaces would be exactly that, and while one is in
+    # place the negative probes below are meaningless: a rule granting ALL matches every argv.
+    others=$(grep NOPASSWD <<<"$listing" | grep -vF -- "$GATE" | sed 's/^\s*/      /')
+    if [[ -n $others ]]; then
+        fail "$user: other NOPASSWD entries bypass the gate entirely:"$'\n'"$others"
+        warn "$user: skipping the rule-width checks — a broader rule matches every argv"
+        return
+    fi
+    ok "$user: the gate is the only NOPASSWD entry"
+
+    # Negative argv matching: neither shape that would widen the rule may match.
     if "$REAL_SUDO" -l -U "$user" "$GATE" id >/dev/null 2>&1; then
         fail "$user: bare '$GATE id' matches — the rule is too wide"
     else
@@ -239,13 +282,13 @@ check_matching() {
     else
         ok "$user: '$GATE --' matches nothing"
     fi
-
-    # The gate is only the sole path to root if nothing else is passwordless for this uid. A
-    # leftover rule from whatever chain this replaces would be exactly that.
-    local others
-    others=$(grep NOPASSWD <<<"$listing" | grep -vF -- "$GATE" | sed 's/^\s*/      /')
-    [[ -z $others ]] && ok "$user: the gate is the only NOPASSWD entry" \
-        || warn "$user: other NOPASSWD entries bypass the gate:"$'\n'"$others"
+    # /usr/bin/sudoedit is a symlink to sudo that /usr/local/bin does not shadow, so it reaches real
+    # sudo without passing the shim. Only sudoers can deny it, and nothing should authorize it.
+    if "$REAL_SUDO" -l -U "$user" sudoedit /etc/hosts >/dev/null 2>&1; then
+        fail "$user: 'sudoedit /etc/hosts' matches — an ungated edit-as-root path"
+    else
+        ok "$user: sudoedit matches nothing"
+    fi
 }
 
 # root's own rule is what the interpreter path's inner sudo relies on, and sudoers(5) implies SETENV
@@ -253,17 +296,21 @@ check_matching() {
 check_root_rule() {
     local listing
     listing=$("$REAL_SUDO" -l -U root 2>/dev/null || true)
-    grep -qE '\(ALL(:ALL)?\)\s+ALL' <<<"$listing" \
+    # `sudo -l` renders the runas spec with spaces, as "(ALL : ALL)", and may carry tags between it
+    # and the command. What matters is that the command it ends in is ALL.
+    grep -qE '\(ALL[^)]*\)[^#]*\bALL\s*$' <<<"$listing" \
         && ok "root has a rule matching ALL (implies SETENV)" \
         || warn "root has no ALL rule — the interpreter path's inner sudo will refuse VAR=value"
 }
 
 # --- main -------------------------------------------------------------------
 users=()
+trusted=(root)
 while (( $# )); do
     case $1 in
         --group) [[ ${2:-} ]] || usage; GROUP=$2; shift 2 ;;
         --user) [[ ${2:-} ]] || usage; users+=("$2"); shift 2 ;;
+        --trusted) [[ ${2:-} ]] || usage; trusted+=("$2"); shift 2 ;;
         -h|--help) usage ;;
         *) usage ;;
     esac

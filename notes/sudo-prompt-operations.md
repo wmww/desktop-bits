@@ -65,7 +65,9 @@ switches to sudo-rs, which supports a subset of sudoers.
   sudo is a supported flow, so "the agent's sudo works and is attributable" is a verification item.
 - `sudo -n` for a group member is denied immediately, with no password and no gate prompt, so
   non-interactive callers fail fast instead of parking on the lock.
-- *(script)* `secure_path` is set, so the PATH the gate execs against is root-controlled.
+- `secure_path` is **not** a requirement. The gate never reads its inherited PATH (see
+  `permission-prompt.md`), so nothing about the prompt's honesty depends on it. Still worth setting
+  for sudo used outside the gate; `verify.sh` deliberately does not check it.
 - *(script)* `use_pty` is on, so the approved command does not share the caller's terminal, where
   another process of the caller's uid could inject input via TIOCSTI. Check
   `dev.tty.legacy_tiocsti=0` as a second layer.
@@ -131,8 +133,9 @@ code paths until someone runs them as root:
   the gate never did, an interpreter round trip (`sudo -u <other> id`) with the interpreter named in
   the prompt, `-i`/`-s` smoke tests including Ctrl-C and window resize through the nested `use_pty`
   layers, and `use_pty` behaviour under a full-screen command such as `less`.
-- Denial of `-e` and its abbreviations via all three routes: the shim, an explicit `sudo -e`, and a
-  direct `sudo-prompt -- /usr/bin/sudo --ed …`.
+- Denial of `-e` and its abbreviations via the shim's own classification and via a direct
+  `sudo-prompt -- /usr/bin/sudo --ed …`. `verify.sh` now covers the third route, `/usr/bin/sudoedit`
+  reaching real sudo without passing the shim, by checking sudoers authorizes it for nobody.
 - The journal record actually landing.
 - The panic hook unlocking (needs a panic injected into a GTK callback).
 - The generic presenter's `auto` fallback ordering on a compositor that lacks the session lock

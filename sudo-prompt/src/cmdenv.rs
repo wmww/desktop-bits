@@ -14,8 +14,11 @@ use std::ffi::CString;
 use crate::cli::Request;
 use crate::envsetup::Captured;
 
-/// Fallback if sudo handed us no PATH at all. secure_path being set is a verification item.
-const FALLBACK_PATH: &[u8] = b"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// The command's PATH, always. Never the inherited one: sudo's env_reset preserves the *caller's*
+/// PATH unless secure_path is set, and the two arrive identically, so a gate that read the
+/// inherited value could not tell a root-controlled PATH from a caller-chosen one. A caller who
+/// wants a different PATH asks for it with a `PATH=` assignment, which the prompt shows.
+const COMMAND_PATH: &[u8] = b"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A passthrough value longer than this is dropped rather than sanitized.
 const MAX_PASSTHROUGH_LEN: usize = 256;
@@ -72,11 +75,9 @@ pub fn build(
     prov: &Provenance,
     root_shell: &[u8],
 ) -> CommandEnv {
-    let path = cap.secure_path.clone().unwrap_or_else(|| FALLBACK_PATH.to_vec());
-
     // 1. Root-controlled base. None of it is caller data.
     let mut vars: Vec<(Vec<u8>, Vec<u8>)> = vec![
-        (b"PATH".to_vec(), path),
+        (b"PATH".to_vec(), COMMAND_PATH.to_vec()),
         (b"HOME".to_vec(), b"/root".to_vec()),
         (b"USER".to_vec(), b"root".to_vec()),
         (b"LOGNAME".to_vec(), b"root".to_vec()),
@@ -127,7 +128,6 @@ mod tests {
 
     fn cap() -> Captured {
         Captured {
-            secure_path: Some(b"/usr/bin:/bin".to_vec()),
             sudo_uid: Some(b"1006".to_vec()),
             sudo_gid: Some(b"1007".to_vec()),
             sudo_user: Some(b"ai".to_vec()),
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn base_values_are_root_controlled() {
         let e = build(&cap(), &req(&[], "id", &[]), &prov(), b"/bin/bash");
-        assert_eq!(e.get(b"PATH").unwrap(), b"/usr/bin:/bin");
+        assert_eq!(e.get(b"PATH").unwrap(), COMMAND_PATH);
         assert_eq!(e.get(b"HOME").unwrap(), b"/root");
         assert_eq!(e.get(b"USER").unwrap(), b"root");
         assert_eq!(e.get(b"LOGNAME").unwrap(), b"root");
@@ -272,12 +272,18 @@ mod tests {
         assert!(envp.iter().any(|c| c.as_bytes() == b"HOME=/root"));
     }
 
+    /// The inherited PATH is never a source, so nothing sudo does to it can steer resolution.
     #[test]
-    fn missing_secure_path_falls_back() {
-        let mut c = cap();
-        c.secure_path = None;
-        let e = build(&c, &req(&[], "id", &[]), &prov(), b"/bin/bash");
-        assert_eq!(e.get(b"PATH").unwrap(), FALLBACK_PATH);
+    fn path_is_always_root_controlled() {
+        let e = build(&cap(), &req(&[], "id", &[]), &prov(), b"/bin/bash");
+        assert_eq!(e.get(b"PATH").unwrap(), COMMAND_PATH);
+    }
+
+    /// The one way a caller can change it, and the prompt shows the assignment.
+    #[test]
+    fn a_path_assignment_overrides_the_default() {
+        let e = build(&cap(), &req(&[("PATH", "/opt/bin")], "id", &[]), &prov(), b"/bin/bash");
+        assert_eq!(e.get(b"PATH").unwrap(), &b"/opt/bin"[..]);
     }
 
     #[test]

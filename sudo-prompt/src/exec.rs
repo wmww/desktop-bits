@@ -5,7 +5,7 @@
 //! rewritten at approval time — after GTK init, with GLib worker threads running, where clearing or
 //! replacing the environment races any concurrent read. `execvpe` avoids that but resolves PATH from
 //! the *caller's* `environ` and not from the `envp` it passes on (verified against this host's
-//! glibc), which with a scrubbed gate environment would silently ignore both secure_path and any
+//! glibc), which with a scrubbed gate environment would silently ignore the command's PATH and any
 //! `PATH=` assignment.
 
 use std::ffi::CString;
@@ -44,7 +44,7 @@ fn probe(candidate: &[u8]) -> Probe {
 }
 
 /// Resolve COMMAND against the PATH of the *final* environment: the request's `PATH=` assignment
-/// if it carried one, else the captured secure_path.
+/// if it carried one, else the gate's own root-controlled list. Never an inherited PATH.
 ///
 /// Empty path elements are skipped rather than treated as the current directory, matching sudo's
 /// `ignore_dot` default.
