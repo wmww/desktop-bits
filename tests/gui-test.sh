@@ -21,8 +21,8 @@ KEEP=${1:-}
 
 # The Approve button's centre for the fixed `/bin/echo coord` request on a 1280x720 output. A
 # positive click test runs first, so a stale coordinate fails loudly instead of silently passing.
-APPROVE_X=834
-APPROVE_Y=671
+APPROVE_X=792
+APPROVE_Y=474
 
 pass=0; fail=0
 ok()   { echo "PASS  $1"; pass=$((pass+1)); }

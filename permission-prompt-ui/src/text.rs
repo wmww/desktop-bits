@@ -40,6 +40,15 @@ pub fn wrapped(text: &Escaped, classes: &[&str]) -> gtk::Label {
     l
 }
 
+/// A one-line label that ellipsizes rather than wrapping, so showing and hiding it never changes
+/// the height of the row it sits in.
+pub fn status(text: &Escaped, classes: &[&str]) -> gtk::Label {
+    let l = label(text, classes);
+    l.set_wrap(false);
+    l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    l
+}
+
 /// A monospace, non-wrapping label for one rendered token or `NAME=value` line.
 pub fn mono_line(text: &Escaped) -> gtk::Label {
     let l = label(text, &["pp-mono"]);

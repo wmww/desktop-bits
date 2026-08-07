@@ -1,13 +1,21 @@
 //! Dialog layout. Trusted fields and buttons sit outside every viewport and keep their natural
 //! size; caller-controlled fields live in bounded scrolling viewports and are what shrinks.
+//!
+//! The layout is deliberately spare: a heading, a trusted subtitle, and a two-column grid of
+//! short gutter labels against their values. Anything the reader can infer from the shape of the
+//! dialog — that Enter answers it, that the big box is the thing being asked about — is not
+//! written out.
 
 use gtk::prelude::*;
 
 use crate::text;
 use crate::untrusted::Escaped;
 
-/// Tallest a non-expanding caller-controlled viewport gets before it scrolls.
+/// Tallest a caller-controlled viewport gets before it scrolls, and the taller allowance for the
+/// one field marked [`Field::expand`]. These are natural heights, not minimums: every viewport
+/// still shrinks to nothing when the output cannot fit the dialog.
 const MAX_VIEWPORT_HEIGHT: i32 = 120;
+const MAX_EXPANDED_HEIGHT: i32 = 360;
 
 /// Hard ceiling on rendered lines in one caller-controlled field.
 pub const MAX_FIELD_LINES: usize = 512;
@@ -26,26 +34,31 @@ pub enum Style {
 pub enum FieldKind {
     /// Compiled-in prose or gate-computed values. Never scrolls, never moves.
     Trusted,
+    /// Trusted prose that changes what the request means. Same guarantees, louder.
+    Warning,
     /// Caller data. Bounded scrolling viewport, monospace, overflow marked.
     Untrusted,
 }
 
 pub struct Field {
+    /// Short gutter label, lowercase. Empty for a field whose meaning is obvious from its place.
     pub label: &'static str,
     pub lines: Vec<Escaped>,
     pub kind: FieldKind,
     /// Extra trusted notes rendered under the field.
     pub notes: Vec<Escaped>,
-    /// This field reports no natural height and takes whatever vertical space is left over.
-    /// Mark the field the reader most needs room for. The others size to their content, so the
-    /// dialog's natural height stays small enough that a cramped output shrinks the viewports
-    /// rather than pushing the buttons off screen.
+    /// This field may grow much taller than the others before it scrolls. Mark the field the
+    /// reader most needs room for.
     pub expand: bool,
 }
 
 impl Field {
     pub fn trusted(label: &'static str, lines: Vec<Escaped>) -> Self {
         Field { label, lines, kind: FieldKind::Trusted, notes: Vec::new(), expand: false }
+    }
+
+    pub fn warning(lines: Vec<Escaped>) -> Self {
+        Field { label: "", lines, kind: FieldKind::Warning, notes: Vec::new(), expand: false }
     }
 
     pub fn untrusted(label: &'static str, lines: Vec<Escaped>) -> Self {
@@ -67,13 +80,13 @@ impl Field {
 pub struct DialogSpec {
     pub style: Style,
     pub heading: &'static str,
+    /// Trusted lines under the heading: who is asking, or what this prompt is not.
+    pub subtitle: Vec<Escaped>,
     /// Icon name to show beside the heading. A name, not text: it cannot render caller prose.
     pub icon: Option<String>,
     pub fields: Vec<Field>,
     pub approve: &'static str,
     pub deny: &'static str,
-    /// Prose describing how to answer. Swapped for the "wait" message while settling.
-    pub footer: &'static str,
 }
 
 /// One built dialog instance. Every output gets its own.
@@ -81,97 +94,118 @@ pub struct Dialog {
     pub root: gtk::Widget,
     pub approve: gtk::Button,
     pub deny: gtk::Button,
-    footer: gtk::Label,
-    footer_text: &'static str,
+    /// Says why the controls are dead. Faded out rather than hidden once they are not: a widget
+    /// that stops taking space would move the buttons at the instant they become live, and
+    /// whatever the pointer was over could become the other button.
+    settling: gtk::Label,
 }
 
-const SETTLING_FOOTER: &str = "Reading… controls unlock in a moment.";
+const SETTLING: &str = "controls unlock in a moment";
 
 impl Dialog {
     /// Visibly disable the controls while the prompt is settling.
     pub fn set_settled(&self, settled: bool) {
         self.approve.set_sensitive(settled);
         self.deny.set_sensitive(settled);
-        text::set(
-            &self.footer,
-            &if settled {
-                Escaped::literal(self.footer_text)
-            } else {
-                Escaped::literal(SETTLING_FOOTER)
-            },
-        );
+        self.settling.set_opacity(if settled { 0.0 } else { 1.0 });
     }
 }
 
 pub fn build(spec: &DialogSpec) -> Dialog {
-    let dialog = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let dialog = gtk::Box::new(gtk::Orientation::Vertical, 12);
     dialog.add_css_class("pp-dialog");
     dialog.add_css_class(match spec.style {
         Style::Gate => "pp-gate",
         Style::Generic => "pp-generic",
     });
     dialog.set_halign(gtk::Align::Center);
-    // Fill vertically: the expanding field takes the slack, so the dialog stays as tall as its
-    // output and the trusted fields and buttons keep their natural size.
-    dialog.set_valign(gtk::Align::Fill);
+    // Centred at its natural height rather than stretched over the output: nothing here wants to be
+    // bigger than its content. Under pressure the enclosing viewport allocates less than that, and
+    // the caller-controlled viewports — minimum height zero — are what gives.
+    dialog.set_valign(gtk::Align::Center);
 
+    dialog.append(&build_header(spec));
+
+    let grid = gtk::Grid::new();
+    grid.add_css_class("pp-fields");
+    grid.set_row_spacing(6);
+    grid.set_column_spacing(10);
+    let mut row = 0;
+    for field in &spec.fields {
+        row = attach_field(&grid, field, row);
+    }
+    dialog.append(&grid);
+
+    // The settling message shares the buttons' row: on a cramped output every line of fixed
+    // chrome is a line the buttons might not get.
+    let settling = text::status(&Escaped::literal(SETTLING), &["pp-settling"]);
+    settling.set_valign(gtk::Align::Center);
+    let deny = text::button(spec.deny, &["pp-deny"]);
+    let approve = text::button(spec.approve, &["pp-approve"]);
+
+    let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    bottom.add_css_class("pp-buttons");
+    bottom.append(&settling);
+    // Holds the buttons against the right edge whether or not the settling message is there.
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bottom.append(&spacer);
+    bottom.append(&deny);
+    bottom.append(&approve);
+    dialog.append(&bottom);
+
+    let d = Dialog { root: dialog.upcast(), approve, deny, settling };
+    d.set_settled(false);
+    d
+}
+
+fn build_header(spec: &DialogSpec) -> gtk::Widget {
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     header.add_css_class("pp-header");
     if let Some(name) = &spec.icon {
         let image = gtk::Image::from_icon_name(name);
         image.set_icon_size(gtk::IconSize::Large);
+        image.set_valign(gtk::Align::Start);
         header.append(&image);
     }
-    header.append(&text::wrapped(&Escaped::literal(spec.heading), &["pp-heading"]));
-    dialog.append(&header);
-
-    for field in &spec.fields {
-        dialog.append(&build_field(field));
+    let titles = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    titles.append(&text::wrapped(&Escaped::literal(spec.heading), &["pp-heading"]));
+    for line in &spec.subtitle {
+        titles.append(&text::wrapped(line, &["pp-subtitle"]));
     }
-
-    // Footer and buttons share a row for the same reason as the marker above.
-    let footer = text::wrapped(&Escaped::literal(SETTLING_FOOTER), &["pp-footer"]);
-    footer.set_hexpand(true);
-    footer.set_valign(gtk::Align::Center);
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    buttons.add_css_class("pp-buttons");
-    buttons.set_halign(gtk::Align::End);
-    let deny = text::button(spec.deny, &["pp-deny"]);
-    let approve = text::button(spec.approve, &["pp-approve"]);
-    buttons.append(&deny);
-    buttons.append(&approve);
-
-    let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    bottom.append(&footer);
-    bottom.append(&buttons);
-    dialog.append(&bottom);
-
-    let d = Dialog {
-        root: dialog.upcast(),
-        approve,
-        deny,
-        footer,
-        footer_text: spec.footer,
-    };
-    d.set_settled(false);
-    d
+    header.append(&titles);
+    header.upcast()
 }
 
-fn build_field(field: &Field) -> gtk::Widget {
-    let outer = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    outer.add_css_class("pp-field");
+/// Attach one field's rows to the grid and return the next free row.
+///
+/// A labelled field puts its short label in the gutter and its value beside it; an unlabelled one
+/// spans both columns, so a dialog with no labels at all wastes no width on an empty gutter.
+fn attach_field(grid: &gtk::Grid, field: &Field, mut row: i32) -> i32 {
+    let (value, notes) = build_value(field);
+    value.set_hexpand(true);
+    if field.label.is_empty() {
+        grid.attach(&value, 0, row, 2, 1);
+    } else {
+        let label = text::label(&Escaped::literal(field.label), &["pp-field-label"]);
+        label.set_valign(gtk::Align::Start);
+        grid.attach(&label, 0, row, 1, 1);
+        grid.attach(&value, 1, row, 1, 1);
+    }
+    row += 1;
+    for note in notes {
+        if field.label.is_empty() {
+            grid.attach(&note, 0, row, 2, 1);
+        } else {
+            grid.attach(&note, 1, row, 1, 1);
+        }
+        row += 1;
+    }
+    row
+}
 
-    // The overflow marker shares the label's row rather than taking one of its own: on a small
-    // output every line of fixed chrome is a line the buttons might not get.
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    header.append(&text::label(&Escaped::literal(field.label), &["pp-field-label"]));
-    let marker = text::label(&Escaped::literal(""), &["pp-overflow"]);
-    marker.set_hexpand(true);
-    marker.set_xalign(1.0);
-    marker.set_visible(false);
-    header.append(&marker);
-    outer.append(&header);
-
+/// The field's value widget, plus any note rows that belong under it.
+fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
     let (lines, capped) = cap(&field.lines);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("pp-field-content");
@@ -183,6 +217,7 @@ fn build_field(field: &Field) -> gtk::Widget {
         truncated_any |= line.was_truncated();
         match field.kind {
             FieldKind::Trusted => content.append(&text::wrapped(line, &["pp-trusted-value"])),
+            FieldKind::Warning => content.append(&text::wrapped(line, &["pp-warning-value"])),
             FieldKind::Untrusted => content.append(&text::mono_line(line)),
         }
     }
@@ -190,10 +225,31 @@ fn build_field(field: &Field) -> gtk::Widget {
         content.append(&text::label(&Escaped::literal("(none)"), &["pp-empty"]));
     }
 
-    match field.kind {
-        FieldKind::Trusted => {
-            outer.append(&content);
-        }
+    let mut notes: Vec<gtk::Widget> = Vec::new();
+    if escaped_any {
+        notes.push(
+            text::wrapped(
+                &Escaped::literal("unsafe characters shown as \\xNN or \\u{NNNN}"),
+                &["pp-note", "pp-warn"],
+            )
+            .upcast(),
+        );
+    }
+    if truncated_any {
+        notes.push(
+            text::wrapped(
+                &Escaped::literal("TRUNCATED — not everything is shown here; see the log"),
+                &["pp-note", "pp-warn"],
+            )
+            .upcast(),
+        );
+    }
+    for note in &field.notes {
+        notes.push(text::wrapped(note, &["pp-note"]).upcast());
+    }
+
+    let value: gtk::Widget = match field.kind {
+        FieldKind::Trusted | FieldKind::Warning => content.upcast(),
         FieldKind::Untrusted => {
             let scroller = gtk::ScrolledWindow::new();
             scroller.add_css_class("pp-viewport");
@@ -204,38 +260,28 @@ fn build_field(field: &Field) -> gtk::Widget {
             scroller.set_overlay_scrolling(false);
             // The viewports are what shrinks when the dialog will not fit its output.
             scroller.set_min_content_height(0);
-            if field.expand {
-                scroller.set_propagate_natural_height(false);
-                scroller.set_vexpand(true);
-                outer.set_vexpand(true);
+            scroller.set_propagate_natural_height(true);
+            scroller.set_max_content_height(if field.expand {
+                MAX_EXPANDED_HEIGHT
             } else {
-                scroller.set_propagate_natural_height(true);
-                scroller.set_max_content_height(MAX_VIEWPORT_HEIGHT);
-            }
-            outer.append(&scroller);
+                MAX_VIEWPORT_HEIGHT
+            });
+            reserve_hscrollbar_room(&scroller);
+
+            // The overflow count floats over the bottom of the viewport rather than taking a row
+            // of its own, so it costs nothing when it is not shown and no layout jump when it is.
+            let marker = text::label(&Escaped::literal(""), &["pp-overflow"]);
+            marker.set_halign(gtk::Align::End);
+            marker.set_valign(gtk::Align::End);
+            marker.set_visible(false);
+            let overlay = gtk::Overlay::new();
+            overlay.set_child(Some(&scroller));
+            overlay.add_overlay(&marker);
             wire_overflow_marker(&scroller, &marker, lines.len());
+            overlay.upcast()
         }
-    }
-
-    if escaped_any {
-        outer.append(&text::wrapped(
-            &Escaped::literal(
-                "Unsafe characters were escaped for display as \\xNN or \\u{NNNN}.",
-            ),
-            &["pp-note", "pp-warn"],
-        ));
-    }
-    if truncated_any {
-        outer.append(&text::wrapped(
-            &Escaped::literal("TRUNCATED — this field does not show everything. See the log."),
-            &["pp-note", "pp-warn"],
-        ));
-    }
-    for note in &field.notes {
-        outer.append(&text::wrapped(note, &["pp-note"]));
-    }
-
-    outer.upcast()
+    };
+    (value, notes)
 }
 
 /// Apply the per-field ceilings. Returns the lines to render and whether anything was dropped.
@@ -250,6 +296,33 @@ fn cap(lines: &[Escaped]) -> (Vec<Escaped>, bool) {
         out.push(line.clone());
     }
     (out, false)
+}
+
+/// Keep a visible horizontal scrollbar from eating the field's last line.
+///
+/// A scrolled window counts the scrollbar in the height it asks for only under `Always`, since
+/// under `Automatic` it cannot know whether the bar will be there — so an automatic bar that does
+/// appear silently costs the field its last line and starts it scrolling vertically too. Switch
+/// the policy to `Always` for exactly as long as the content overflows sideways. This settles:
+/// the extra height does not change how wide the content is.
+fn reserve_hscrollbar_room(scroller: &gtk::ScrolledWindow) {
+    let adj = scroller.hadjustment();
+    let scroller = scroller.clone();
+    let update = move |adj: &gtk::Adjustment| {
+        let policy = if adj.upper() > adj.page_size() + 0.5 {
+            gtk::PolicyType::Always
+        } else {
+            gtk::PolicyType::Automatic
+        };
+        if scroller.policy().0 != policy {
+            scroller.set_policy(policy, gtk::PolicyType::Automatic);
+        }
+    };
+    adj.connect_changed({
+        let update = update.clone();
+        move |a| update(a)
+    });
+    adj.connect_value_changed(move |a| update(a));
 }
 
 fn wire_overflow_marker(scroller: &gtk::ScrolledWindow, marker: &gtk::Label, total_lines: usize) {
@@ -274,7 +347,7 @@ fn wire_overflow_marker(scroller: &gtk::ScrolledWindow, marker: &gtk::Label, tot
             &Escaped::concat([
                 Escaped::literal("▾ "),
                 Escaped::number(hidden as u64),
-                Escaped::literal(" more line(s) — scroll"),
+                Escaped::literal(" more"),
             ]),
         );
         marker.set_visible(true);
@@ -292,31 +365,42 @@ window.pp-window { background-color: #0a0b0f; }
 .pp-dialog {
   background-color: #16181f;
   border-radius: 12px;
-  padding: 14px;
+  padding: 16px 18px;
   border: 2px solid #2a2d38;
   color: #e6e8ef;
 }
 .pp-dialog.pp-gate { border-color: #b3461f; }
 .pp-dialog.pp-generic { border-color: #2f5fa8; }
-.pp-heading { font-size: 1.5em; font-weight: bold; }
+.pp-heading { font-size: 1.35em; font-weight: bold; }
 .pp-dialog.pp-gate .pp-heading { color: #ff9b6a; }
 .pp-dialog.pp-generic .pp-heading { color: #8ab4f8; }
-.pp-field-label { font-size: 0.85em; color: #98a0b3; text-transform: uppercase; }
-.pp-trusted-value { font-size: 1.05em; font-weight: bold; }
+.pp-subtitle { font-size: 0.95em; color: #98a0b3; }
+.pp-field-label { font-size: 0.9em; color: #6d7488; }
+.pp-trusted-value { font-size: 1.0em; }
+.pp-warning-value { color: #ffb27a; }
 .pp-mono { font-family: monospace; font-size: 0.95em; color: #d7dbe6; }
 .pp-viewport {
   background-color: #0d0e13;
-  border: 1px solid #2a2d38;
+  border: 1px solid #22252e;
   border-radius: 6px;
-  padding: 4px;
+  padding: 4px 6px;
 }
-.pp-field-content { padding: 2px; }
+.pp-field-content { padding: 1px; }
+/* The theme's slider minimum is a floor under every viewport's height, which leaves a one-line
+   field standing in a box three lines tall. */
+.pp-viewport scrollbar slider { min-height: 14px; min-width: 14px; }
 .pp-empty { color: #6d7488; font-style: italic; }
-.pp-note { font-size: 0.85em; color: #98a0b3; }
-.pp-overflow { font-size: 0.85em; color: #ffd479; }
+.pp-note { font-size: 0.85em; color: #6d7488; }
+.pp-overflow {
+  font-size: 0.8em;
+  color: #ffd479;
+  background-color: #0d0e13;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin: 2px 14px;
+}
 .pp-warn { color: #ffb27a; }
-.pp-footer { font-size: 0.9em; color: #98a0b3; }
-.pp-buttons { margin-top: 2px; }
+.pp-settling { font-size: 0.9em; color: #6d7488; }
 .pp-deny, .pp-approve { padding: 8px 20px; }
 .pp-approve { background-image: none; background-color: #7a2f14; color: #ffe6d8; }
 .pp-dialog.pp-generic .pp-approve { background-color: #234a80; color: #dce8ff; }

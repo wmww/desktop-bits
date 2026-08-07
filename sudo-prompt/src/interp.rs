@@ -83,25 +83,17 @@ fn is_assignment(tok: &[u8]) -> bool {
 /// Fixed compiled-in prose for the trusted warning field, picked from the scan's own result and
 /// never built out of the request text.
 pub fn prose(i: &Interpreter) -> Vec<&'static str> {
-    let mut out = vec!["This request runs a second sudo, as root."];
+    let mut out = vec!["Runs a second sudo as root."];
     if i.shell {
-        out.push(
-            "It grants an interactive root shell — it will not prompt again for anything it \
-             then runs.",
-        );
+        out.push("Gives an interactive root shell: nothing it then runs will prompt again.");
         if i.as_other_user {
-            out.push(
-                "The shell runs as another user or group, and still never prompts again.",
-            );
+            out.push("The shell runs as another user or group, and still never prompts again.");
         }
         if i.inner_command {
-            out.push(
-                "The arguments below are joined and interpreted by a shell, not run as a \
-                 command: shell metacharacters in them are code.",
-            );
+            out.push("The arguments below are shell code, not a command.");
         }
     } else if i.as_other_user {
-        out.push("It runs the command below as another user or group.");
+        out.push("Runs the command below as another user or group.");
     }
     out
 }
@@ -226,7 +218,7 @@ mod tests {
 
         let shell_args =
             prose(&Interpreter { shell: true, inner_command: true, ..Default::default() });
-        assert!(shell_args.iter().any(|l| l.contains("joined and interpreted by a shell")));
+        assert!(shell_args.iter().any(|l| l.contains("shell code, not a command")));
 
         let as_user =
             prose(&Interpreter { as_other_user: true, inner_command: true, ..Default::default() });

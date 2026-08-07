@@ -19,13 +19,11 @@ const EXIT_ERROR: i32 = 3;
 const HEADING: &str = "Permission requested";
 const APPROVE: &str = "Allow";
 const DENY: &str = "Deny";
-const FOOTER: &str = "Enter allows · Escape denies";
 
 /// Compiled-in, so the presenter can never be dressed up as the sudo gate or as a lock screen.
-const DISCLAIMER: &[&str] = &[
-    "An application asked for this. It is not a sudo prompt and nothing here runs as root.",
-    "Your session is not locked: denying returns you straight to the desktop.",
-];
+const DISCLAIMER: &str =
+    "An application asked. Not a sudo prompt and not a lock screen: nothing here runs as root, \
+     and denying returns you to the desktop.";
 
 #[derive(Parser)]
 #[command(
@@ -104,20 +102,18 @@ fn main() {
 /// Caller prose is visually quarantined: escaped through the same `Untrusted` path and shown in the
 /// same bounded, overflow-marked viewports as the gate's caller-controlled fields.
 fn spec(args: &Args) -> DialogSpec {
-    let mut fields = vec![Field::trusted(
-        "About this prompt",
-        DISCLAIMER.iter().copied().map(Escaped::literal).collect(),
-    )];
-
+    // No labels: the caller's own prose is the content, and the viewports around it are what say
+    // it came from the caller.
+    let mut fields = Vec::new();
     if let Some(title) = &args.title {
-        fields.push(Field::untrusted("Title", vec![escape(title)]));
+        fields.push(Field::untrusted("", vec![escape(title)]));
     }
     if let Some(body) = &args.body {
-        fields.push(Field::untrusted("Message", lines(body)).expanding());
+        fields.push(Field::untrusted("", lines(body)).expanding());
     }
     if !args.details.is_empty() {
         fields.push(Field::untrusted(
-            "Details",
+            "",
             args.details.iter().flat_map(|d| lines(d)).collect(),
         ));
     }
@@ -125,11 +121,11 @@ fn spec(args: &Args) -> DialogSpec {
     DialogSpec {
         style: Style::Generic,
         heading: HEADING,
+        subtitle: vec![Escaped::literal(DISCLAIMER)],
         icon: args.icon.clone().or_else(|| Some("dialog-question-symbolic".to_string())),
         fields,
         approve: APPROVE,
         deny: DENY,
-        footer: FOOTER,
     }
 }
 

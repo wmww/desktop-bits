@@ -1,7 +1,8 @@
 # permission-prompt / sudo-prompt
 
-Replaces the zenity/bash sudo authorization chain described in `host-sudo-setup.md`. Built; see
-`sudo-prompt-operations.md` for installing and verifying it on the host.
+Replaces the zenity/bash sudo authorization chain described in `host-sudo-setup.md`. Built; the
+install steps are in the repo README, and `sudo-prompt-operations.md` has the rollout order, the
+manual verification items and the recovery drill.
 
 ## What exists
 
@@ -10,7 +11,7 @@ permission-prompt-ui/   GTK + surface-mode primitives; internal workspace API
 sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its parsers)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-install/                installer + sudoers drop-in
+install/                verify script + sudoers drop-in (installing itself is manual, see README)
 tests/gui-test.sh       19 behavioural checks in a nested sway
 ~~~
 
@@ -162,7 +163,7 @@ the list because without it every interactive root command is unusable; `TERMINF
 Assignments are applied **without filtering** — a deliberate difference from stock sudo. There is no
 `env_check`/`env_delete` equivalent and `LD_PRELOAD` is not special-cased, so
 `sudo --preserve-env=LD_PRELOAD cmd` works. The mitigation is disclosure, not filtering: every
-caller-controlled name and value is rendered in the prompt's Environment field, and because the
+caller-controlled name and value is rendered in the prompt's `env` field, and because the
 environment is constructed rather than inherited that field is a *complete* account of what the
 caller put into the root command's environment.
 
@@ -217,6 +218,22 @@ Argv is displayed exactly as requested, one shell-quoted token per line, unresol
 happens at exec time against the captured root PATH, and displaying a resolved path would promise an
 inode identity the gate cannot hold across the approval window.
 
+### What the dialog says, and what it leaves out
+
+The prompt carries only what the decision needs. No field is labelled unless the label says
+something the reader could not infer: the gate is a heading, a trusted subtitle naming the
+requester, an unlabelled command box, and `in` / `env` gutter rows. There is no key-binding prose
+(Enter and Escape on a two-button dialog are not news), no "about this prompt" block on the gate,
+and no note explaining that root's own PATH/HOME/USER are set — `env` lists what the *caller* added,
+which is the only part anyone can act on. The generic presenter keeps its one compiled-in
+disclaimer, as the trusted subtitle, because "this is not the sudo gate" is exactly what a reader
+cannot infer.
+
+The one status line that stays is "controls unlock in a moment", which answers the question a
+greyed-out button raises. It is faded to opacity 0 rather than hidden once settled: a widget that
+stops taking space would move the buttons at the instant they go live, and the pointer could end up
+over the *other* one.
+
 ### Layout under pressure
 
 An `ext-session-lock-v1` surface must commit exactly the size the compositor configured, so a dialog
@@ -224,14 +241,24 @@ whose *minimum* exceeds a small output is a protocol error — which kills the c
 session locked. That is not a theoretical risk; it happened during development at 480x360.
 
 So: caller-controlled fields live in bounded scrolling viewports with `min-content-height` 0 and a
-permanently visible (non-overlay) scrollbar plus an "N more lines" marker on the field's label row.
-Exactly one field per dialog is marked `expanding()` — the Command field for the gate, Message for
-the generic presenter — and reports *no* natural height, so it absorbs slack and keeps the dialog's
-natural height equal to its trusted chrome. Every window also has an outer scroller as the last
-resort for an output too small even for that; keys still answer the prompt in that state. Trusted
-fields, footer and buttons keep their natural size and are the last thing to give. Overflow markers
-share the field label's row and the footer shares the buttons' row, because on a cramped output every
-line of fixed chrome is a line the buttons might not get.
+permanently visible (non-overlay) scrollbar, plus an "N more" marker floating over the bottom of the
+viewport. Their natural height is their content, capped (120px, or 360px for the one field per
+dialog marked `expanding()` — the command for the gate, the message for the generic presenter). The
+dialog is `valign: Center`, so a scrolled window allocates it its natural height on a roomy output
+and squeezes it towards its minimum on a cramped one, where the viewports — minimum height zero —
+are what gives. Verified: at 1280x720 the dialog hugs its content; at 480x360 it shrinks and the
+buttons stay put; at 320x240 the outer scroller takes over, which is the documented last resort
+where keys still answer the prompt.
+
+Two GTK details that cost an afternoon:
+
+- A scrolled window counts a horizontal scrollbar in the height it requests only under
+  `PolicyType::Always`; under `Automatic` an appearing bar silently eats the field's last line and
+  starts it scrolling vertically too. `reserve_hscrollbar_room` flips the horizontal policy to
+  `Always` exactly while the content overflows sideways. It settles, because the extra height does
+  not change how wide the content is.
+- The theme's scrollbar-slider minimum height is a floor under every viewport, which left a one-line
+  field sitting in a three-line box. `.pp-viewport scrollbar slider { min-height: 14px }` removes it.
 
 Hard ceilings: 4096 rendered characters per token, 512 lines and 64 KiB per field, each with an
 unmissable truncation marker — scrolling does not help if GTK is laying out a megabyte of argv.

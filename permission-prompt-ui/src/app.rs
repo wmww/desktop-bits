@@ -270,8 +270,6 @@ fn new_window(cfg: &Rc<PromptConfig>, state: &State) -> (gtk::Window, Rc<Dialog>
         d.set_settled(shown);
     }
 
-    d.root.set_hexpand(true);
-    d.root.set_vexpand(true);
     d.root.set_margin_top(12);
     d.root.set_margin_bottom(12);
     d.root.set_margin_start(12);
@@ -288,9 +286,10 @@ fn new_window(cfg: &Rc<PromptConfig>, state: &State) -> (gtk::Window, Rc<Dialog>
     fit.set_child(Some(&d.root));
     fit.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     fit.set_overlay_scrolling(false);
-    // The dialog's natural height is its minimum (the expanding field reports none), so this
-    // allocates the dialog the whole output whenever it fits and only scrolls when even the
-    // trusted fields and buttons cannot.
+    // A scrolled window allocates its child the viewport size as long as that is at least the
+    // child's minimum, so the dialog is centred at its natural height on a roomy output, squeezed
+    // towards its minimum on a cramped one, and only scrolled — the last resort, where keys still
+    // answer the prompt — when even the trusted fields and buttons do not fit.
     fit.set_propagate_natural_width(true);
     fit.set_propagate_natural_height(true);
     fit.set_min_content_width(0);

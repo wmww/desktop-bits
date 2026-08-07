@@ -11,9 +11,6 @@ use crate::interp::Interpreter;
 const HEADING: &str = "Run a command as root?";
 const APPROVE: &str = "Run as root";
 const DENY: &str = "Cancel";
-const FOOTER: &str = "Enter runs it as root · Escape cancels";
-const BASE_ENV_NOTE: &str =
-    "Plus root's own PATH, HOME, USER, LOGNAME, SHELL and SUDO_* — not caller data.";
 
 pub struct Rendered {
     pub spec: DialogSpec,
@@ -30,23 +27,19 @@ pub fn build(
 ) -> Rendered {
     let mut fields = Vec::new();
 
-    // The uid field is the only thing separating "I typed this" from "the agent typed this", so it
-    // is trusted, prominent, and never adjacent to caller-controlled text.
-    fields.push(Field::trusted(
-        "Requested by",
-        vec![Escaped::concat([
-            Escaped::literal("uid "),
-            Escaped::number(prov.uid as u64),
-            Escaped::literal(" ("),
-            Escaped::of(&Untrusted::from_bytes(prov.user.clone())),
-            Escaped::literal("), gid "),
-            Escaped::number(prov.gid as u64),
-        ])],
-    ));
+    // Who asked is the only thing separating "I typed this" from "the agent typed this", so it sits
+    // in the trusted header, under the heading and never adjacent to caller-controlled text.
+    let subtitle = vec![Escaped::concat([
+        Escaped::literal("requested by uid "),
+        Escaped::number(prov.uid as u64),
+        Escaped::literal(" ("),
+        Escaped::of(&Untrusted::from_bytes(prov.user.clone())),
+        Escaped::literal("), gid "),
+        Escaped::number(prov.gid as u64),
+    ])];
 
     if let Some(i) = interp {
-        fields.push(Field::trusted(
-            "Warning",
+        fields.push(Field::warning(
             crate::interp::prose(i).into_iter().map(Escaped::literal).collect(),
         ));
     }
@@ -60,10 +53,20 @@ pub fn build(
     }
     let command_log =
         tokens.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" ");
-    fields.push(Field::untrusted("Command", tokens).expanding());
+    // Unlabelled: it sits directly under the heading that asks about it.
+    fields.push(Field::untrusted("", tokens).expanding());
 
+    fields.push(Field::untrusted(
+        "in",
+        vec![match cwd {
+            Some(c) => Escaped::shell_token(&Untrusted::from_bytes(c.to_vec())),
+            None => Escaped::literal("(unavailable)"),
+        }],
+    ));
+
+    // Only what the caller added: the gate constructs the rest of the environment itself.
     let mut env_field = Field::untrusted(
-        "Command environment",
+        "env",
         env.caller
             .iter()
             .map(|(n, v)| {
@@ -73,10 +76,9 @@ pub fn build(
                 )
             })
             .collect(),
-    )
-    .with_note(Escaped::literal(BASE_ENV_NOTE));
+    );
     if !env.dropped.is_empty() {
-        let mut parts = vec![Escaped::literal("Dropped for failing validation: ")];
+        let mut parts = vec![Escaped::literal("dropped as invalid: ")];
         for (n, name) in env.dropped.iter().enumerate() {
             if n > 0 {
                 parts.push(Escaped::literal(", "));
@@ -87,23 +89,15 @@ pub fn build(
     }
     fields.push(env_field);
 
-    fields.push(Field::untrusted(
-        "Working directory",
-        vec![match cwd {
-            Some(c) => Escaped::shell_token(&Untrusted::from_bytes(c.to_vec())),
-            None => Escaped::literal("(unavailable)"),
-        }],
-    ));
-
     Rendered {
         spec: DialogSpec {
             style: Style::Gate,
             heading: HEADING,
+            subtitle,
             icon: Some("dialog-warning-symbolic".to_string()),
             fields,
             approve: APPROVE,
             deny: DENY,
-            footer: FOOTER,
         },
         command_log,
     }
@@ -133,26 +127,28 @@ mod tests {
         r.spec.fields.iter().find(|f| f.label == label).expect("field present")
     }
 
-    #[test]
-    fn trusted_fields_are_not_scrolling_and_caller_fields_are() {
-        let r = render(&["--", "/usr/bin/ls", "-l"]);
-        assert_eq!(field(&r, "Requested by").kind, FieldKind::Trusted);
-        assert_eq!(field(&r, "Command").kind, FieldKind::Untrusted);
-        assert_eq!(field(&r, "Command environment").kind, FieldKind::Untrusted);
-        assert_eq!(field(&r, "Working directory").kind, FieldKind::Untrusted);
+    /// The command field carries no label: it is the one field that expands.
+    fn command(r: &Rendered) -> &Field {
+        r.spec.fields.iter().find(|f| f.expand).expect("command field present")
     }
 
     #[test]
-    fn requesting_uid_is_rendered_from_provenance() {
+    fn every_caller_controlled_field_scrolls() {
+        let r = render(&["--", "/usr/bin/ls", "-l"]);
+        assert!(r.spec.fields.iter().all(|f| f.kind == FieldKind::Untrusted));
+        assert_eq!(command(&r).label, "");
+    }
+
+    #[test]
+    fn requesting_uid_is_rendered_in_the_trusted_header() {
         let r = render(&["--", "id"]);
-        let f = field(&r, "Requested by");
-        assert_eq!(f.lines[0].as_str(), "uid 1006 (ai), gid 1007");
+        assert_eq!(r.spec.subtitle[0].as_str(), "requested by uid 1006 (ai), gid 1007");
     }
 
     #[test]
     fn one_shell_quoted_token_per_line() {
         let r = render(&["--", "/usr/bin/rm", "-rf", "/tmp/a b", "x'y"]);
-        let f = field(&r, "Command");
+        let f = command(&r);
         assert_eq!(
             f.lines.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
             vec!["/usr/bin/rm", "-rf", "'/tmp/a b'", "'x'\\''y'"]
@@ -163,7 +159,7 @@ mod tests {
     #[test]
     fn markup_and_mnemonics_stay_literal() {
         let r = render(&["--", "/bin/echo", "<b>Run a command as root?</b>", "_Approve"]);
-        let f = field(&r, "Command");
+        let f = command(&r);
         assert!(f.lines[1].as_str().contains("<b>Run a command as root?</b>"));
         assert!(f.lines[2].as_str().contains("_Approve"));
     }
@@ -171,7 +167,7 @@ mod tests {
     #[test]
     fn control_bytes_in_argv_are_escaped_and_flagged() {
         let r = render(&["--", "/bin/echo", "a\u{1b}[31mred"]);
-        let f = field(&r, "Command");
+        let f = command(&r);
         assert!(f.lines[1].as_str().contains("\\x1b"));
         assert!(f.lines[1].was_escaped());
     }
@@ -179,36 +175,33 @@ mod tests {
     #[test]
     fn assignments_show_in_the_environment_field_not_the_command_field() {
         let r = render(&["--", "LD_PRELOAD=/tmp/evil.so", "/bin/id"]);
-        let cmd = field(&r, "Command");
-        assert_eq!(cmd.lines.len(), 1);
-        let env = field(&r, "Command environment");
+        assert_eq!(command(&r).lines.len(), 1);
+        let env = field(&r, "env");
         assert!(env.lines.iter().any(|l| l.as_str() == "LD_PRELOAD=/tmp/evil.so"));
-        assert!(env.notes[0].as_str().contains("not caller data"));
     }
 
     #[test]
     fn interpreter_requests_get_a_trusted_warning() {
         let r = render(&["--", "/usr/bin/sudo", "-u", "ff", "id"]);
-        let w = field(&r, "Warning");
-        assert_eq!(w.kind, FieldKind::Trusted);
+        let w = r.spec.fields.iter().find(|f| f.kind == FieldKind::Warning).expect("warning");
         assert!(w.lines.iter().any(|l| l.as_str().contains("second sudo")));
         assert!(w.lines.iter().any(|l| l.as_str().contains("as another user")));
         // The path stays in the command field with the rest of the argv.
-        assert_eq!(field(&r, "Command").lines[0].as_str(), "/usr/bin/sudo");
+        assert_eq!(command(&r).lines[0].as_str(), "/usr/bin/sudo");
     }
 
     #[test]
     fn plain_requests_get_no_warning_field() {
         let r = render(&["--", "/usr/bin/ls"]);
-        assert!(r.spec.fields.iter().all(|f| f.label != "Warning"));
+        assert!(r.spec.fields.iter().all(|f| f.kind != FieldKind::Warning));
     }
 
     #[test]
-    fn missing_cwd_renders_as_trusted_prose() {
+    fn missing_cwd_is_named_rather_than_left_blank() {
         let req = cli::parse(&[OsString::from("--"), OsString::from("id")]).unwrap();
         let prov = Provenance { uid: 1, gid: 1, user: b"x".to_vec() };
         let env = crate::cmdenv::build(&crate::envsetup::Captured::default(), &req, &prov, b"/bin/sh");
         let r = build(&req, None, &prov, None, &env);
-        assert_eq!(field(&r, "Working directory").lines[0].as_str(), "(unavailable)");
+        assert_eq!(field(&r, "in").lines[0].as_str(), "(unavailable)");
     }
 }
