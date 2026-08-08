@@ -14,13 +14,23 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 /// Fixed, root-controlled PATH for the gate itself. The command gets its own, see [`crate::cmdenv`].
 const GATE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Named passthrough candidates for the *command's* environment. TERM is here because without it
-/// every interactive root command is unusable; its loader-dangerous relatives TERMINFO, TERMCAP
-/// and TERMPATH are deliberately not.
-pub const PASSTHROUGH: &[&str] = &["TERM", "COLORTERM", "LANG", "LANGUAGE"];
+/// Named passthrough candidates for the *command's* environment: TERM and nothing else.
+///
+/// TERM is here because without it every interactive root command is unusable, and because its
+/// value is not otherwise recoverable — no other source knows the caller's terminal. Its
+/// loader-dangerous relatives TERMINFO, TERMINFO_DIRS, TERMCAP and TERMPATH are deliberately
+/// absent: those redirect the terminfo search, and with them gone every lookup lands under a
+/// root-owned directory (TERM itself is only ever an index into one).
+///
+/// The locale variables used to be here and are not any more. LANG, LANGUAGE and LC_* are
+/// caller-controlled switches on root-program *semantics* — decimal separator, collation order,
+/// rpmatch() yes/no patterns, date formats, gettext message text — so a root script that parses
+/// its own output or matches a translated string can be steered by them. Unlike TERM they have a
+/// safe fixed answer, so [`crate::cmdenv`] sets one instead of forwarding the caller's.
+pub const PASSTHROUGH: &[&str] = &["TERM"];
 
 pub fn is_passthrough(name: &[u8]) -> bool {
-    PASSTHROUGH.iter().any(|n| n.as_bytes() == name) || name.starts_with(b"LC_")
+    PASSTHROUGH.iter().any(|n| n.as_bytes() == name)
 }
 
 /// Everything kept from the inherited environment. Not the whole environment.
@@ -89,14 +99,18 @@ mod tests {
     #[test]
     fn passthrough_membership() {
         assert!(is_passthrough(b"TERM"));
-        assert!(is_passthrough(b"COLORTERM"));
-        assert!(is_passthrough(b"LANG"));
-        assert!(is_passthrough(b"LANGUAGE"));
-        assert!(is_passthrough(b"LC_ALL"));
-        assert!(is_passthrough(b"LC_TIME"));
+        // The locale variables are root-controlled now, not forwarded.
+        assert!(!is_passthrough(b"LANG"));
+        assert!(!is_passthrough(b"LANGUAGE"));
+        assert!(!is_passthrough(b"LC_ALL"));
+        assert!(!is_passthrough(b"LC_TIME"));
+        assert!(!is_passthrough(b"COLORTERM"));
+        // These redirect the terminfo search; TERM alone only indexes into it.
         assert!(!is_passthrough(b"TERMINFO"));
+        assert!(!is_passthrough(b"TERMINFO_DIRS"));
         assert!(!is_passthrough(b"TERMCAP"));
         assert!(!is_passthrough(b"TERMPATH"));
+        assert!(!is_passthrough(b"LOCPATH"));
         assert!(!is_passthrough(b"LD_PRELOAD"));
         assert!(!is_passthrough(b"DISPLAY"));
         assert!(!is_passthrough(b"XAUTHORITY"));

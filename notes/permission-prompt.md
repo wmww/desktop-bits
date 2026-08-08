@@ -12,7 +12,7 @@ sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its pa
 sudo-prompt/verify.sh   read-only check of a deployed setup (setup itself is manual, see README)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-tests/gui-test.sh       19 behavioural checks in a nested sway
+tests/gui-test.sh       21 behavioural checks in a nested sway
 ~~~
 
 ## Goal and threat model
@@ -154,29 +154,56 @@ unintended. Never configure root's GTK from caller `GTK_THEME`, `GTK_MODULES`, `
 `environ`, and a source lint enforces it.
 
 The **command's** is constructed from exactly three things: a root-controlled base (a fixed
-`COMMAND_PATH`, `HOME=/root`, `USER`/`LOGNAME=root`, root's passwd shell); a short validated
-passthrough list
-(`TERM`, `COLORTERM`, `LANG`, `LANGUAGE`, `LC_*` — a value failing a bounded-length, conservative
-charset check is dropped, never sanitized); and the request's assignments, applied last. Then the
-gate sets `SUDO_UID`/`GID`/`USER`/`COMMAND` itself so provenance cannot be rewritten. `TERM` is on
-the list because without it every interactive root command is unusable; `TERMINFO`, `TERMCAP` and
-`TERMPATH` are not.
+`COMMAND_PATH`, `HOME=/root`, `USER`/`LOGNAME=root`, root's passwd shell, `LANG=C.UTF-8`); one
+validated passthrough, `TERM`; and the request's assignments, applied last. Then the gate sets
+`SUDO_UID`/`GID`/`USER`/`COMMAND` itself so provenance cannot be rewritten.
+
+**`TERM` is the only inherited variable.** It is there because without it every interactive root
+command is unusable and because no other source knows the caller's terminal. `TERMINFO`,
+`TERMINFO_DIRS`, `TERMCAP` and `TERMPATH` are not: those redirect the terminfo *search*, and with
+them gone every lookup lands under a root-owned directory, leaving `TERM` as only an index into
+one. `cmdenv::term_ok` validates it as a terminfo entry name — leading letter, then alphanumerics
+and `. _ + -`, ≤64 bytes — which is an allowlist of the shape a terminal name has rather than a
+charset. Notably no `/` and no leading `.`: `TERM` is used downstream as a path component, and a
+name that can hold a separator or a `..` is a traversal waiting for a search root that isn't
+root-owned. Current ncurses rejects those itself (verified: it does not even `stat`), but that is
+ncurses' invariant to keep, not ours. A failing value is dropped, never sanitized, and the drop is
+noted in the prompt.
+
+**The locale is root-controlled, not inherited.** `LANG`, `LANGUAGE` and `LC_*` are caller-controlled
+switches on root-program *semantics* — decimal separator, collation order (so `sort` and `[a-z]`
+glob ranges), `rpmatch()` yes/no patterns, date formats, gettext message text — so a root script
+that parses its own output or matches a translated string can be steered by them without anything
+appearing in the prompt. Unlike `TERM` they have a safe fixed answer, so the gate sets
+`LANG=C.UTF-8` and forwards none of them. The file-loading half of the worry turned out to be
+already closed on glibc 2.44: a locale name containing `..` or a leading `.` is refused before any
+filesystem access, and an absolute-looking one is *concatenated* under root-owned
+`/usr/lib/locale/` rather than honoured (`LC_ALL=/tmp/x` opens `/usr/lib/locale//tmp/x/LC_CTYPE`).
+`LOCPATH`, which would genuinely redirect the load, was never a passthrough candidate. The
+semantic half is the reason for the change.
 
 **PATH is never inherited.** `env_reset` preserves the *caller's* `PATH` unless `secure_path` is
 set, and the two arrive at the gate identically, so a gate reading the inherited value could not
 tell them apart — it would resolve the approved command against a caller-chosen list while the
 prompt named a bare `id`. Reading it at all made an external sudoers setting load-bearing for the
 prompt's honesty, so the gate reads neither and always uses `cmdenv::COMMAND_PATH`. A caller who
-wants a different PATH sends `PATH=…`, which arrives in argv and is shown in the Environment field
+wants a different PATH sends `PATH=…`, which arrives in argv and is shown in the `env` field
 like any other assignment. `secure_path` is still worth setting for sudo used outside the gate, but
 nothing here depends on it.
 
 Assignments are applied **without filtering** — a deliberate difference from stock sudo. There is no
 `env_check`/`env_delete` equivalent and `LD_PRELOAD` is not special-cased, so
 `sudo --preserve-env=LD_PRELOAD cmd` works. The mitigation is disclosure, not filtering: every
-caller-controlled name and value is rendered in the prompt's `env` field, and because the
-environment is constructed rather than inherited that field is a *complete* account of what the
-caller put into the root command's environment.
+assignment is rendered in the prompt's `env` field, so the field is a complete account of what the
+caller *asked* to put into the root command's environment.
+
+The field deliberately does **not** list the inherited `TERM`. It used to list the whole passthrough
+set, which meant `COLORTERM`, `LANG` and `TERM` appeared on every single request — ambient shell
+state nobody set on purpose, sitting three lines above the line that might say `LD_PRELOAD=`. That
+trains the eye to skip the field, which costs more than the disclosure buys. So `CommandEnv` splits
+`assigned` (displayed) from `inherited` (not), and the shrunken passthrough plus `term_ok` is what
+pays for the silence: hiding a value means its validator is the only backstop, so the validator got
+strict at the same time the list got short. In the ordinary case the `env` field is now empty.
 
 Consequences to remember: `sudo gui-app` no longer inherits DISPLAY/XAUTHORITY, and HOME is root's.
 Name them (`--preserve-env=DISPLAY,XAUTHORITY`) and they work and are displayed. On the interpreter

@@ -64,10 +64,13 @@ pub fn build(
         }],
     ));
 
-    // Only what the caller added: the gate constructs the rest of the environment itself.
+    // Only what the request asked for. The gate constructs the rest itself, and the one inherited
+    // variable (TERM) is ambient shell state present on every request — listing it put three lines
+    // of noise above the line that might say `LD_PRELOAD=`, which is the line this field exists
+    // for. It is shape-validated instead, see `cmdenv::term_ok`.
     let mut env_field = Field::untrusted(
         "env",
-        env.caller
+        env.assigned
             .iter()
             .map(|(n, v)| {
                 Escaped::assignment(
@@ -87,7 +90,12 @@ pub fn build(
         }
         env_field = env_field.with_note(Escaped::concat(parts));
     }
-    fields.push(env_field);
+    // Omitted entirely when there is nothing to say, rather than shown as a label against blank
+    // space: a request that sets no variables is the common one, and an absent row says so as
+    // clearly as an empty one. The field appearing at all now means something.
+    if !env_field.lines.is_empty() || !env_field.notes.is_empty() {
+        fields.push(env_field);
+    }
 
     Rendered {
         spec: DialogSpec {
@@ -113,7 +121,11 @@ mod tests {
     fn render(argv: &[&str]) -> Rendered {
         let req = cli::parse(&argv.iter().map(OsString::from).collect::<Vec<_>>()).unwrap();
         let prov = Provenance { uid: 1006, gid: 1007, user: b"ai".to_vec() };
-        let cap = crate::envsetup::Captured::default();
+        // A realistic capture: TERM is present on every request a real caller makes.
+        let cap = crate::envsetup::Captured {
+            passthrough: vec![(b"TERM".to_vec(), b"xterm-256color".to_vec())],
+            ..Default::default()
+        };
         let env = crate::cmdenv::build(&cap, &req, &prov, b"/bin/bash");
         let interp = crate::interp::is_interpreter(&req)
             .then(|| crate::interp::scan(&req.args).unwrap());
@@ -175,6 +187,40 @@ mod tests {
         assert_eq!(command(&r).lines.len(), 1);
         let env = field(&r, "env");
         assert!(env.lines.iter().any(|l| l.as_str() == "LD_PRELOAD=/tmp/evil.so"));
+    }
+
+    /// The env field is for what the caller *asked* for. Inherited shell state arrives on every
+    /// request, so listing it taught the eye to skip the field that also carries `LD_PRELOAD=`.
+    #[test]
+    fn inherited_shell_state_is_not_listed() {
+        // Nothing was asked for, so there is no env row at all — not an empty one.
+        let r = render(&["--", "/bin/id"]);
+        assert!(r.spec.fields.iter().all(|f| f.label != "env"));
+
+        let r = render(&["--", "LD_PRELOAD=/tmp/evil.so", "/bin/id"]);
+        let env = field(&r, "env");
+        assert_eq!(
+            env.lines.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+            vec!["LD_PRELOAD=/tmp/evil.so"]
+        );
+        assert!(env.notes.is_empty());
+    }
+
+    /// An ordinary TERM is silent, but a malformed one is exactly the anomaly worth surfacing.
+    #[test]
+    fn a_dropped_passthrough_is_still_noted() {
+        let req = cli::parse(&[OsString::from("--"), OsString::from("id")]).unwrap();
+        let prov = Provenance { uid: 1, gid: 1, user: b"x".to_vec() };
+        let cap = crate::envsetup::Captured {
+            passthrough: vec![(b"TERM".to_vec(), b"../../tmp/evil".to_vec())],
+            ..Default::default()
+        };
+        let env = crate::cmdenv::build(&cap, &req, &prov, b"/bin/sh");
+        let r = build(&req, None, &prov, Some(b"/home/x"), &env);
+        let f = field(&r, "env");
+        assert!(f.lines.is_empty());
+        assert_eq!(f.notes.len(), 1);
+        assert!(f.notes[0].as_str().contains("dropped as invalid: TERM"));
     }
 
     #[test]

@@ -19,10 +19,13 @@ GATE=$REPO/target/test-seams/debug/sudo-prompt
 GENERIC=$REPO/target/debug/permission-prompt
 KEEP=${1:-}
 
-# The Approve button's centre for the fixed `/bin/echo coord` request on a 1280x720 output. A
-# positive click test runs first, so a stale coordinate fails loudly instead of silently passing.
+# The Approve button's centre for the fixed `/bin/echo coord` request on a 1280x720 output. The
+# dialog is centred at its natural height, so *anything* that changes which fields that request
+# renders moves this: it dropped 27px when the env field stopped being drawn for a request that
+# sets no variables. A positive click test runs first, so a stale coordinate fails loudly instead
+# of silently passing.
 APPROVE_X=792
-APPROVE_Y=474
+APPROVE_Y=447
 
 pass=0; fail=0
 ok()   { echo "PASS  $1"; pass=$((pass+1)); }
@@ -52,11 +55,15 @@ cleanup() {
 trap cleanup EXIT
 
 # Launch the gate inside the session and return once its prompt has settled.
+
+# Extra caller-side environment for one launch, to prove a variable is or is not forwarded.
+LAUNCH_ENV=""
+
 launch() {
     rm -f "$DIR/gate.log" "$DIR/gate.status"
     local args="" a
     for a in "$@"; do args+=" $(printf '%q' "$a")"; done
-    swaymsg exec "env SUDO_UID=$(id -u) SUDO_GID=$(id -g) \
+    swaymsg exec "env $LAUNCH_ENV SUDO_UID=$(id -u) SUDO_GID=$(id -g) \
         SUDO_PROMPT_TEST_DISPLAY_ROOT=$DIR SUDO_PROMPT_TEST_LOCK_PATH=$DIR/lock RUST_LOG=debug \
         sh -c '$GATE --$args >$DIR/gate.log 2>&1; echo \$? >$DIR/gate.status'" >/dev/null
 }
@@ -217,12 +224,30 @@ fi
 wdotool key Escape; finished >/dev/null
 
 # --- what the approved command inherits -------------------------------------
+# A caller-side locale and a second terminal variable, neither of which may reach root.
+LAUNCH_ENV="LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 LC_NUMERIC=de_DE.UTF-8 LANGUAGE=de \
+    COLORTERM=truecolor TERM=xterm-256color"
 launch /bin/sh -c 'ls /proc/self/fd; env'; settled
 wdotool key Return; finished
+LAUNCH_ENV=""
 if gatelog | grep -qE "WAYLAND_(SOCKET|DISPLAY)|XDG_RUNTIME_DIR"; then
     bad "command environment" "a display variable leaked to the approved command"
 else
     ok "no display variables reach the approved command"
+fi
+# The caller's locale silently changes number formatting, collation and gettext output inside
+# whatever root runs, so the command gets a root-controlled one instead.
+if gatelog | grep -qx "LANG=C.UTF-8" && ! gatelog | grep -qE "^(LANGUAGE|LC_[A-Z]+)="; then
+    ok "the command's locale is root-controlled"
+else
+    bad "command locale" "$(gatelog | grep -E '^(LANG|LANGUAGE|LC_)' | tr '\n' ' ')"
+fi
+# TERM is the one inherited variable, and the only one of its family.
+if gatelog | grep -qx "TERM=xterm-256color" && ! gatelog | grep -qE "^(COLORTERM|TERMINFO|TERMCAP)="
+then
+    ok "TERM is forwarded and nothing else in its family is"
+else
+    bad "command TERM" "$(gatelog | grep -E '^(TERM|COLORTERM)' | tr '\n' ' ')"
 fi
 # /bin/sh's own fds plus the dirfd ls opens; the Wayland fd must not be among them.
 if [[ $(gatelog | grep -cE "^[0-9]+$") -le 4 ]]; then

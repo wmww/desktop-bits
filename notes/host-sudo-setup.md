@@ -75,9 +75,11 @@ API — assume no sudo plugins either way.
 - `pkexec` is installed: a separate, ungated path to root with a spoofable toplevel prompt.
 - `/usr/bin/sudoedit` is a symlink to `sudo` and is not shadowed by `/usr/local/bin/`.
 
-## sudo/libc facts checked 2026-07-29
+## sudo/libc facts checked 2026-07-29 (locale/terminfo items 2026-08-07)
 
-Verified against this host's sudo 1.9 docs and glibc; `permission-prompt` depends on all three.
+Verified against this host's sudo 1.9 docs, glibc 2.44 and ncurses; `permission-prompt` depends on
+all of them. The last two are the *reason* a check exists, not a check the gate relies on — it
+validates `TERM` itself rather than trusting either library, see `permission-prompt.md`.
 
 - **SETENV is implied for a sudoers rule matching `ALL`** (sudoers(5)). So `root ALL=(ALL:ALL) ALL`
   accepts `VAR=value` and `-E`/`--preserve-env` with no explicit tag — which is what lets the gate's
@@ -92,3 +94,15 @@ Verified against this host's sudo 1.9 docs and glibc; `permission-prompt` depend
   environment therefore cannot use `execvpe` to resolve against the child's PATH — resolve manually
   and `execve`. `execvp` has the same problem in reverse: it needs `environ` mutated, which is
   unsafe once a toolkit has started threads.
+- **glibc will not follow a locale name out of `/usr/lib/locale`** (traced with `strace` on 2.44). A
+  name containing `..`, or starting with `.`, is refused before any filesystem access and
+  `setlocale` returns NULL. An absolute-looking name is *concatenated*, not honoured:
+  `LC_ALL=/tmp/x` opens `/usr/lib/locale//tmp/x/LC_CTYPE`, which stays under a root-owned directory.
+  `LOCPATH` is the variable that genuinely redirects the load. So a forwarded `LANG` is not a
+  file-loading hazard — the hazard is semantic (decimal separator, collation, `rpmatch`, gettext
+  text silently changing what a root script does), which is why the gate sets `LANG=C.UTF-8` and
+  forwards no locale variable at all.
+- **ncurses rejects a `TERM` containing `/` or `..` outright** — no `openat`, no `access`, just
+  `unknown terminal`. Lookup is `/usr/share/terminfo/<c>/<name>` plus `$HOME/.terminfo`, so with
+  `TERMINFO`/`TERMINFO_DIRS`/`TERMCAP`/`TERMPATH` unset and `HOME=/root` every search root is
+  root-owned and `TERM` is only an index into one.
