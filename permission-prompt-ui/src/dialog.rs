@@ -415,37 +415,45 @@ fn wire_overflow_marker(scroller: &gtk::ScrolledWindow, marker: &gtk::Label, bod
     adj.connect_value_changed(move |a| update(a));
 }
 
+/// Everything colour here comes from the theme's named colours, so the prompt looks like the rest
+/// of the desktop rather than like one particular palette. Only the two derived shades below are
+/// ours, and both are mixes of theme colours. The names used are the ones every GTK theme defines.
+///
+/// The gate is red and the generic presenter blue: the two must never be mistakable for each
+/// other, and that distinction is the one thing the theme does not get to decide.
 pub const CSS: &str = "
-window.pp-window { background-color: #0a0b0f; }
-.pp-backdrop { background-color: #0a0b0f; }
+/* The recessed background of a caller-controlled viewport, and the same shade under the overflow
+   marker that floats over it. A mix rather than a fixed colour, so it stays a slight step away
+   from the dialog in a light theme and a dark one alike. */
+@define-color pp_inset mix(@theme_base_color, @theme_fg_color, 0.06);
+window.pp-window { background-color: @theme_bg_color; }
+.pp-backdrop { background-color: @theme_bg_color; }
 .pp-dialog {
-  background-color: #16181f;
+  background-color: @theme_base_color;
   border-radius: 12px;
   padding: 16px 18px;
-  border: 2px solid #2a2d38;
-  color: #e6e8ef;
+  border: 2px solid @borders;
+  color: @theme_text_color;
 }
-.pp-dialog.pp-gate { border-color: #b3461f; }
-.pp-dialog.pp-generic { border-color: #2f5fa8; }
+.pp-dialog.pp-gate { border-color: @error_color; }
+.pp-dialog.pp-generic { border-color: @accent_color; }
 .pp-heading { font-size: 1.35em; font-weight: bold; }
-.pp-dialog.pp-gate .pp-heading { color: #ff9b6a; }
-.pp-dialog.pp-generic .pp-heading { color: #8ab4f8; }
-.pp-subtitle { font-size: 0.95em; color: #98a0b3; }
-.pp-field-label { font-size: 0.9em; color: #6d7488; }
+.pp-dialog.pp-gate .pp-heading { color: @error_color; }
+.pp-dialog.pp-generic .pp-heading { color: @accent_color; }
+.pp-subtitle { font-size: 0.95em; color: @insensitive_fg_color; }
+.pp-field-label { font-size: 0.9em; color: @insensitive_fg_color; }
 .pp-trusted-value { font-size: 1.0em; }
-.pp-warning-value { color: #ffb27a; }
-.pp-mono { font-family: monospace; font-size: 0.95em; color: #d7dbe6; }
+.pp-warning-value { color: @warning_color; }
+.pp-mono { font-family: monospace; font-size: 0.95em; }
 /* The one field the reader is being asked about. */
 .pp-prominent { font-size: 1.3em; font-weight: bold; }
-.pp-dialog.pp-gate .pp-prominent { color: #ff9b6a; }
-.pp-dialog.pp-generic .pp-prominent { color: #8ab4f8; }
+.pp-dialog.pp-gate .pp-prominent { color: @error_color; }
+.pp-dialog.pp-generic .pp-prominent { color: @accent_color; }
 /* Caller data outside a viewport: quieter than the boxed fields, never louder. */
-.pp-flat { font-family: monospace; font-size: 1.05em; color: #98a0b3; }
-/* Every field is selectable, so the selection has to be legible on the viewport background. */
-.pp-dialog selection { background-color: #35405c; color: #f2f5ff; }
+.pp-flat { font-family: monospace; font-size: 1.05em; color: @insensitive_fg_color; }
 .pp-viewport {
-  background-color: #0d0e13;
-  border: 1px solid #22252e;
+  background-color: @pp_inset;
+  border: 1px solid @borders;
   border-radius: 6px;
   padding: 4px 6px;
 }
@@ -453,20 +461,28 @@ window.pp-window { background-color: #0a0b0f; }
 /* The theme's slider minimum is a floor under every viewport's height, which leaves a one-line
    field standing in a box three lines tall. */
 .pp-viewport scrollbar slider { min-height: 14px; min-width: 14px; }
-.pp-empty { color: #6d7488; font-style: italic; }
-.pp-note { font-size: 0.85em; color: #6d7488; }
+.pp-empty { color: @insensitive_fg_color; font-style: italic; }
+.pp-note { font-size: 0.85em; color: @insensitive_fg_color; }
 .pp-overflow {
   font-size: 0.8em;
-  color: #ffd479;
-  background-color: #0d0e13;
+  color: @warning_color;
+  background-color: @pp_inset;
   border-radius: 4px;
   padding: 1px 6px;
   margin: 2px 14px;
 }
-.pp-warn { color: #ffb27a; }
-.pp-settling { font-size: 0.9em; color: #6d7488; }
+.pp-warn { color: @warning_color; }
+.pp-settling { font-size: 0.9em; color: @insensitive_fg_color; }
 .pp-deny, .pp-approve { padding: 8px 20px; }
-.pp-approve { background-image: none; background-color: #7a2f14; color: #ffe6d8; }
-.pp-dialog.pp-generic .pp-approve { background-color: #234a80; color: #dce8ff; }
+/* No border and no theme highlight on the accented button: the theme draws a button outline in its
+   own button colour, which around a filled accent reads as a stray hairline. */
+.pp-approve {
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  background-color: @accent_color;
+  color: @theme_selected_fg_color;
+}
+.pp-dialog.pp-gate .pp-approve { background-color: @error_color; }
 .pp-approve:disabled, .pp-deny:disabled { opacity: 0.45; }
 ";

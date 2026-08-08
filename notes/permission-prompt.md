@@ -344,6 +344,13 @@ GTK details, each of which cost an afternoon:
   under-reports exactly when a command is long enough for the count to matter.
 - The theme's scrollbar-slider minimum height is a floor under every viewport, which left a one-line
   field sitting in a three-line box. `.pp-viewport scrollbar slider { min-height: 14px }` removes it.
+- Every colour is a theme named colour (`@theme_base_color`, `@borders`, `@insensitive_fg_color`,
+  `@warning_color`, plus one `mix()`-derived inset shade for the viewports), so the prompt follows
+  root's GTK theme in light and dark alike. The caller cannot influence which theme that is —
+  `GTK_THEME` is never forwarded — and the gate-vs-generic accent stays fixed in code
+  (`@error_color` against `@accent_color`), because those two must never be confusable whatever the
+  theme does. The approve button clears `border` and `box-shadow`: the theme draws a button outline
+  in its own button colour, which around a filled accent is a stray hairline.
 - A `GtkGrid` hands its spare width to *every* column a spanning child covers, so the full-width
   command field made the gutter column expand and stranded the `env` label a third of a dialog away
   from its own box. The fields are plain rows now, with a fixed-width gutter.
