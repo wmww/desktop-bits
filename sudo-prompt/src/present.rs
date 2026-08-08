@@ -27,18 +27,26 @@ pub fn build(
 ) -> Rendered {
     let mut fields = Vec::new();
 
-    // Display argv exactly as requested: one shell-quoted token per line, no resolution. A
+    // Display argv exactly as requested, as one shell-quoted command line, no resolution. A
     // resolved path would promise an inode identity the gate cannot hold across the approval
     // window.
-    let mut tokens = vec![Escaped::shell_token(&Untrusted::from_bytes(req.command.clone()))];
-    for arg in &req.args {
-        tokens.push(Escaped::shell_token(&Untrusted::from_bytes(arg.clone())));
+    //
+    // One line rather than a token per row: this is the shape the requester typed and the shape
+    // they would paste it back in, and the quoting — `'…'`, or `$'…'` for a token holding anything
+    // the escaper had to touch — is what marks the token boundaries. It is exact, not merely
+    // suggestive: what is on screen pastes back as the same argv.
+    let mut parts = Vec::new();
+    for (n, token) in std::iter::once(&req.command).chain(req.args.iter()).enumerate() {
+        if n > 0 {
+            parts.push(Escaped::literal(" "));
+        }
+        parts.push(Escaped::shell_token(&Untrusted::from_bytes(token.clone())));
     }
-    let command_log =
-        tokens.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" ");
+    let command = Escaped::concat(parts);
+    let command_log = command.as_str().to_string();
     // First and loudest, with no heading above it: the command *is* the question, and a sentence
     // asking it in the gate's own words would only push the answer further down.
-    fields.push(Field::untrusted("", tokens).expanding().prominent());
+    fields.push(Field::untrusted("", vec![command]).expanding().prominent());
 
     // Directly under the command, because it changes what the command means.
     if let Some(i) = interp {
@@ -234,40 +242,48 @@ mod tests {
         };
         assert_eq!(quoted(b"/home/ai"), "ai | ~");
         assert_eq!(quoted(b"/home/ai/a b"), "ai | '~/a b'");
-        assert_eq!(quoted(b"/tmp/x\ny"), "ai | '/tmp/x\\x0ay'");
+        assert_eq!(quoted(b"/tmp/x\ny"), "ai | $'/tmp/x\\x0ay'");
     }
 
+    /// One line, quoted so it reads back as exactly this argv — and so the log record and the
+    /// prompt are the same string rather than two renderings that could drift apart.
     #[test]
-    fn one_shell_quoted_token_per_line() {
+    fn the_command_is_one_shell_quoted_line() {
         let r = render(&["--", "/usr/bin/rm", "-rf", "/tmp/a b", "x'y"]);
         let f = command(&r);
-        assert_eq!(
-            f.lines.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
-            vec!["/usr/bin/rm", "-rf", "'/tmp/a b'", "'x'\\''y'"]
-        );
-        assert_eq!(r.command_log, "/usr/bin/rm -rf '/tmp/a b' 'x'\\''y'");
+        assert_eq!(f.lines.len(), 1);
+        assert_eq!(f.lines[0].as_str(), "/usr/bin/rm -rf '/tmp/a b' 'x'\\''y'");
+        assert_eq!(r.command_log, f.lines[0].as_str());
+    }
+
+    /// A token holding bytes the escaper had to neutralise: quoted so that what is shown still
+    /// pastes back as this argv, not as the literal text `\x0a`.
+    #[test]
+    fn a_token_with_escapes_gets_ansi_c_quoting() {
+        let r = render(&["--", "/bin/echo", "two\nlines"]);
+        assert_eq!(command(&r).lines[0].as_str(), "/bin/echo $'two\\x0alines'");
     }
 
     #[test]
     fn markup_and_mnemonics_stay_literal() {
         let r = render(&["--", "/bin/echo", "<b>Run a command as root?</b>", "_Approve"]);
         let f = command(&r);
-        assert!(f.lines[1].as_str().contains("<b>Run a command as root?</b>"));
-        assert!(f.lines[2].as_str().contains("_Approve"));
+        assert!(f.lines[0].as_str().contains("<b>Run a command as root?</b>"));
+        assert!(f.lines[0].as_str().contains("_Approve"));
     }
 
     #[test]
     fn control_bytes_in_argv_are_escaped_and_flagged() {
         let r = render(&["--", "/bin/echo", "a\u{1b}[31mred"]);
         let f = command(&r);
-        assert!(f.lines[1].as_str().contains("\\x1b"));
-        assert!(f.lines[1].was_escaped());
+        assert!(f.lines[0].as_str().contains("\\x1b"));
+        assert!(f.lines[0].was_escaped());
     }
 
     #[test]
     fn assignments_show_in_the_environment_field_not_the_command_field() {
         let r = render(&["--", "LD_PRELOAD=/tmp/evil.so", "/bin/id"]);
-        assert_eq!(command(&r).lines.len(), 1);
+        assert_eq!(command(&r).lines[0].as_str(), "/bin/id");
         let env = field(&r, "env");
         assert!(env.lines.iter().any(|l| l.as_str() == "LD_PRELOAD=/tmp/evil.so"));
     }
@@ -314,7 +330,7 @@ mod tests {
         assert!(w.lines.iter().any(|l| l.as_str().contains("second sudo")));
         assert!(w.lines.iter().any(|l| l.as_str().contains("as another user")));
         // The path stays in the command field with the rest of the argv.
-        assert_eq!(command(&r).lines[0].as_str(), "/usr/bin/sudo");
+        assert_eq!(command(&r).lines[0].as_str(), "/usr/bin/sudo -u ff id");
     }
 
     #[test]

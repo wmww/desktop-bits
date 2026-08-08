@@ -11,6 +11,9 @@ use gtk::prelude::*;
 
 use crate::untrusted::Escaped;
 
+/// How wide a monospace field asks to be before it wraps, in characters.
+const MONO_WRAP_CHARS: i32 = 56;
+
 /// A label that renders its text literally, and whose text the reader can select and copy.
 ///
 /// Selection is why a field is one label rather than one label per line: a selection cannot span
@@ -75,13 +78,30 @@ pub fn status(text: &Escaped, classes: &[&str]) -> gtk::Label {
     l
 }
 
-/// A monospace, non-wrapping label for rendered tokens or `NAME=value` lines, one per line.
+/// A monospace label for a shell command or `NAME=value` lines.
+///
+/// Wraps rather than running off to the right: a field that scrolls sideways can hide its tail,
+/// and `max-width-chars` is what keeps a long one from making the whole dialog that wide before it
+/// gets the chance to wrap. Nothing here ever ellipsizes — dropping caller bytes silently is the
+/// one thing this field must not do.
 pub fn mono_block(text: &Escaped, classes: &[&str]) -> gtk::Label {
     let l = label(text, &["pp-mono"]);
     for c in classes {
         l.add_css_class(c);
     }
-    l.set_wrap(false);
+    l.set_wrap(true);
+    // Char, not WordChar: Pango counts `-` and `/` as word boundaries, so `--exclude` came out as
+    // `--` at the end of one line and `exclude` at the start of the next, which reads like a
+    // deliberate separator in an argv. Breaking at the column instead is what a terminal does with
+    // a long command, and makes no such claim about where a token ends.
+    l.set_wrap_mode(gtk::pango::WrapMode::Char);
+    l.set_max_width_chars(MONO_WRAP_CHARS);
+    // Pango hyphenates a mid-word break by default, which put a `-` on screen that was not in the
+    // command (`--excl-` / `ude`). An attribute, not markup: it changes how the text is laid out
+    // and cannot introduce any.
+    let attrs = gtk::pango::AttrList::new();
+    attrs.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
+    l.set_attributes(Some(&attrs));
     l.set_ellipsize(gtk::pango::EllipsizeMode::None);
     l
 }

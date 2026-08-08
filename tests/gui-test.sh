@@ -20,16 +20,16 @@ GENERIC=$REPO/target/debug/permission-prompt
 KEEP=${1:-}
 
 # Points inside the fixed `/bin/echo coord` request's dialog on a 1280x720 output: the Approve
-# button's centre, and the two ends of a drag across the command field. The dialog is centred at
+# button's centre, and the two ends of a drag across the command line. The dialog is centred at
 # its natural height, so *anything* that changes which fields that request renders moves these —
 # they dropped 27px when the env field stopped being drawn for a request that sets no variables.
 # A positive click test runs first, so a stale coordinate fails loudly instead of silently passing.
 APPROVE_X=791
-APPROVE_Y=412
-COMMAND_X1=438
-COMMAND_Y1=300
-COMMAND_X2=700
-COMMAND_Y2=336
+APPROVE_Y=399
+COMMAND_X1=436
+COMMAND_Y1=318
+COMMAND_X2=620
+COMMAND_Y2=318
 
 pass=0; fail=0
 ok()   { echo "PASS  $1"; pass=$((pass+1)); }
@@ -195,9 +195,9 @@ if command -v wl-paste >/dev/null; then
         mousemove $COMMAND_X2 $COMMAND_Y2 mouseup 1
     wdotool key ctrl+c
     sleep 0.5
-    # One label per field, so a single drag takes the whole command, not just the line under it.
-    if [[ $(timeout 3 wl-paste -n 2>/dev/null) == "/bin/echo
-coord" ]]; then
+    # One label per field and one line per command, so a drag takes all of it, quoted as a shell
+    # command rather than as a column of tokens.
+    if [[ $(timeout 3 wl-paste -n 2>/dev/null) == "/bin/echo coord" ]]; then
         ok "a drag selects the whole command and Ctrl+C copies it"
     else
         bad "select and copy" "clipboard held '$(timeout 3 wl-paste -n 2>/dev/null)'; log: $(gatelog | tail -3)"

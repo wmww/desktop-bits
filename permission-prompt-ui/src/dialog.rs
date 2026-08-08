@@ -263,10 +263,14 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
     if field.flat {
         classes.push("pp-flat");
     }
+    // Kept for the overflow marker, which counts *rendered* lines and so has to ask the label.
+    let mut body: Option<gtk::Label> = None;
     if lines.is_empty() {
         content.append(&text::label(&Escaped::literal("(none)"), &["pp-empty"]));
     } else if field.kind == FieldKind::Untrusted && !field.flat {
-        content.append(&text::mono_block(&joined, &classes));
+        let l = text::mono_block(&joined, &classes);
+        content.append(&l);
+        body = Some(l);
     } else {
         content.append(&text::wrapped(&joined, &classes));
     }
@@ -275,7 +279,7 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
     if escaped_any {
         notes.push(
             text::wrapped(
-                &Escaped::literal("unsafe characters shown as \\xNN or \\u{NNNN}"),
+                &Escaped::literal("unsafe characters shown as \\xNN or \\uNNNN"),
                 &["pp-note", "pp-warn"],
             )
             .upcast(),
@@ -301,7 +305,10 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
             let scroller = gtk::ScrolledWindow::new();
             scroller.add_css_class("pp-viewport");
             scroller.set_child(Some(&content));
-            scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+            // Never sideways: the content wraps instead. A field that scrolls horizontally can
+            // hide its tail off the right edge behind nothing louder than a scrollbar, and the
+            // tail of a command is exactly where the interesting argument tends to be.
+            scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
             // A permanently visible scrollbar: "there is more to read" must not be something
             // the human has to discover.
             scroller.set_overlay_scrolling(false);
@@ -313,7 +320,6 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
             } else {
                 MAX_VIEWPORT_HEIGHT
             });
-            reserve_hscrollbar_room(&scroller);
 
             // The overflow count floats over the bottom of the viewport rather than taking a row
             // of its own, so it costs nothing when it is not shown and no layout jump when it is.
@@ -324,7 +330,9 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
             let overlay = gtk::Overlay::new();
             overlay.set_child(Some(&scroller));
             overlay.add_overlay(&marker);
-            wire_overflow_marker(&scroller, &marker, lines.len());
+            if let Some(body) = &body {
+                wire_overflow_marker(&scroller, &marker, body);
+            }
             overlay.upcast()
         }
     };
@@ -332,52 +340,40 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
 }
 
 /// Apply the per-field ceilings. Returns the lines to render and whether anything was dropped.
+///
+/// The character ceiling clips *within* a line rather than dropping it: the gate's command is one
+/// line however many arguments it has, and dropping it would leave the field empty.
 fn cap(lines: &[Escaped]) -> (Vec<Escaped>, bool) {
     let mut out = Vec::new();
     let mut chars = 0usize;
     for line in lines {
-        if out.len() >= MAX_FIELD_LINES || chars + line.as_str().chars().count() > MAX_FIELD_CHARS {
+        if out.len() >= MAX_FIELD_LINES {
             return (out, true);
         }
-        chars += line.as_str().chars().count();
+        let len = line.as_str().chars().count();
+        if chars + len > MAX_FIELD_CHARS {
+            out.push(line.clone().clipped(MAX_FIELD_CHARS - chars));
+            return (out, true);
+        }
+        chars += len;
         out.push(line.clone());
     }
     (out, false)
 }
 
-/// Keep a visible horizontal scrollbar from eating the field's last line.
+/// Count of hidden lines, floating over the bottom of a viewport that has more to show.
 ///
-/// A scrolled window counts the scrollbar in the height it asks for only under `Always`, since
-/// under `Automatic` it cannot know whether the bar will be there — so an automatic bar that does
-/// appear silently costs the field its last line and starts it scrolling vertically too. Switch
-/// the policy to `Always` for exactly as long as the content overflows sideways. This settles:
-/// the extra height does not change how wide the content is.
-fn reserve_hscrollbar_room(scroller: &gtk::ScrolledWindow) {
-    let adj = scroller.hadjustment();
-    let scroller = scroller.clone();
-    let update = move |adj: &gtk::Adjustment| {
-        let policy = if adj.upper() > adj.page_size() + 0.5 {
-            gtk::PolicyType::Always
-        } else {
-            gtk::PolicyType::Automatic
-        };
-        if scroller.policy().0 != policy {
-            scroller.set_policy(policy, gtk::PolicyType::Automatic);
-        }
-    };
-    adj.connect_changed({
-        let update = update.clone();
-        move |a| update(a)
-    });
-    adj.connect_value_changed(move |a| update(a));
-}
-
-fn wire_overflow_marker(scroller: &gtk::ScrolledWindow, marker: &gtk::Label, total_lines: usize) {
+/// The count comes from the label's own Pango layout, not from how many `Escaped` lines went in:
+/// the content wraps, so one logical line can be six rendered ones, and a marker counting the
+/// former would under-report exactly when the command is long enough for the count to matter.
+fn wire_overflow_marker(scroller: &gtk::ScrolledWindow, marker: &gtk::Label, body: &gtk::Label) {
     let adj = scroller.vadjustment();
     let marker = marker.clone();
+    let body = body.clone();
     let update = move |adj: &gtk::Adjustment| {
         let upper = adj.upper();
         let page = adj.page_size();
+        let total_lines = body.layout().line_count().max(0) as usize;
         if total_lines == 0 || upper <= page + 0.5 {
             marker.set_visible(false);
             return;

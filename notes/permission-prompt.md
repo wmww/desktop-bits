@@ -245,16 +245,37 @@ mnemonic. The mechanism, not a habit:
 
 Escaping: printable ASCII and ordinary printable non-ASCII (`café.txt`) stay readable; C0 controls
 and DEL become `\xNN`; every other Control, Format, Surrogate, PrivateUse, Unassigned, LineSeparator,
-ParagraphSeparator or SpaceSeparator codepoint becomes `\u{NNNN}` (so U+2028/U+2029, which Pango
-treats as mandatory breaks, and U+00A0, which fakes alignment, cannot move text); invalid UTF-8 is
-escaped **per byte** rather than replaced, because a lossy conversion renders distinct requests
-identically. `\xNN` is reserved for single bytes and `\u{...}` used above ASCII, so a stray `0x85`
-byte and the C1 control U+0085 do not collide. A literal backslash is doubled but does not set the
-"was escaped" flag, so that flag stays meaningful.
+ParagraphSeparator or SpaceSeparator codepoint becomes `\uNNNN` — `\UNNNNNNNN` above the BMP — (so
+U+2028/U+2029, which Pango treats as mandatory breaks, and U+00A0, which fakes alignment, cannot move
+text); invalid UTF-8 is escaped **per byte** rather than replaced, because a lossy conversion renders
+distinct requests identically. `\xNN` is reserved for single bytes and `\uNNNN` used above ASCII, so
+a stray `0x85` byte and the C1 control U+0085 do not collide. A literal backslash is doubled but does
+not set the "was escaped" flag, so that flag stays meaningful.
 
-Argv is displayed exactly as requested, one shell-quoted token per line, unresolved: resolution
-happens at exec time against the captured root PATH, and displaying a resolved path would promise an
-inode identity the gate cannot hold across the approval window.
+Those spellings are bash's, not Rust's, and the widths are fixed at two and four hex digits because
+that is what makes them unambiguous — bash reads *at most* that many, so `\u200b` followed by a
+literal `b` cannot be misread as a five-digit escape.
+
+### Argv on one line
+
+Argv is displayed exactly as requested, unresolved — resolution happens at exec time against the
+root-controlled PATH, and displaying a resolved path would promise an inode identity the gate cannot
+hold across the approval window — and as **one shell-quoted line**, not a token per row. That is the
+shape the requester typed and the shape they would paste back, and it makes the prompt and the log
+record literally the same string.
+
+Quoting carries the token boundaries, in three forms: bare when every byte is safe unquoted; `'…'`
+when it is not; and `$'…'` when the escaper had to write a backslash. The third is not cosmetic — in
+`'…'`, bash takes `\x0a` as five literal characters, so a token containing a newline would be shown
+as a command that pastes back as a *different* argv. `permission-prompt-ui` asserts the round trip
+against a real bash (`rendered_tokens_paste_back_as_the_same_argv`) rather than against our reading
+of its rules, over spaces, quotes, backslashes, invalid UTF-8 and an above-BMP escape.
+
+Two limits worth knowing. A token clipped by the length ceiling pastes as a syntax error, not as a
+shorter command — that is the failure to prefer, and it is the only reason the clip is allowed to
+land mid-quote. And a line long enough to wrap cannot show whether a break fell on a space or inside
+a token, exactly as in a terminal; the per-row layout did not have that ambiguity, and it is the
+price of the shape.
 
 ### What the dialog says, and what it leaves out
 
@@ -305,13 +326,22 @@ are what gives. Verified: at 1280x720 the dialog hugs its content; at 480x360 it
 buttons stay put; at 320x240 the outer scroller takes over, which is the documented last resort
 where keys still answer the prompt.
 
-Two GTK details that cost an afternoon:
+Nothing scrolls sideways: the viewports are `PolicyType::Never` horizontally and the content wraps.
+A field that scrolls horizontally can hide its tail behind nothing louder than a scrollbar, and the
+tail of a command line is where the interesting argument tends to be. `max-width-chars` is what
+bounds the *natural* width so a long line wraps instead of making the whole dialog that wide.
 
-- A scrolled window counts a horizontal scrollbar in the height it requests only under
-  `PolicyType::Always`; under `Automatic` an appearing bar silently eats the field's last line and
-  starts it scrolling vertically too. `reserve_hscrollbar_room` flips the horizontal policy to
-  `Always` exactly while the content overflows sideways. It settles, because the extra height does
-  not change how wide the content is.
+GTK details, each of which cost an afternoon:
+
+- Wrapping needs `WrapMode::Char`, not `WordChar`: Pango counts `-` and `/` as word boundaries, so
+  `--exclude` came out as `--` ending one line and `exclude` starting the next, which reads like a
+  separator that is not in the argv. Char breaks at the column, as a terminal does.
+- Pango then hyphenates the break, putting a `-` on screen that is not in the command (`--excl-` /
+  `ude`). Off via an `insert-hyphens` attribute — an attribute, not markup, so it cannot introduce
+  text.
+- The overflow marker counts the label's *rendered* lines (`layout().line_count()`), not the
+  `Escaped` lines it was built from: one logical line wraps to several, and counting the latter
+  under-reports exactly when a command is long enough for the count to matter.
 - The theme's scrollbar-slider minimum height is a floor under every viewport, which left a one-line
   field sitting in a three-line box. `.pp-viewport scrollbar slider { min-height: 14px }` removes it.
 - A `GtkGrid` hands its spare width to *every* column a spanning child covers, so the full-width
@@ -319,7 +349,9 @@ Two GTK details that cost an afternoon:
   from its own box. The fields are plain rows now, with a fixed-width gutter.
 
 Hard ceilings: 4096 rendered characters per token, 512 lines and 64 KiB per field, each with an
-unmissable truncation marker — scrolling does not help if GTK is laying out a megabyte of argv.
+unmissable truncation marker — scrolling does not help if GTK is laying out a megabyte of argv. The
+character ceiling clips *within* a line rather than dropping it: the command is one line however
+many arguments it has, and dropping it would leave the field empty.
 
 ### Input
 
