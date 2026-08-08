@@ -11,8 +11,21 @@ use gtk::prelude::*;
 
 use crate::untrusted::Escaped;
 
-/// A label that renders its text literally.
+/// A label that renders its text literally, and whose text the reader can select and copy.
+///
+/// Selection is why a field is one label rather than one label per line: a selection cannot span
+/// two widgets, and a command the reader cannot copy in one go is a command they retype by hand.
+/// Selectable labels are focusable, but nothing else here is — buttons set `can-focus` off — so
+/// the only thing focus can reach is text.
 pub fn label(text: &Escaped, classes: &[&str]) -> gtk::Label {
+    let l = plain(text, classes);
+    l.set_selectable(true);
+    l
+}
+
+/// A label that cannot be selected: for text inside something clickable, where a drag has to stay
+/// a click on the widget rather than becoming a text selection.
+fn plain(text: &Escaped, classes: &[&str]) -> gtk::Label {
     let l = gtk::Label::new(None);
     l.set_use_markup(false);
     l.set_use_underline(false);
@@ -23,6 +36,19 @@ pub fn label(text: &Escaped, classes: &[&str]) -> gtk::Label {
     }
     set(&l, text);
     l
+}
+
+/// Join rendered lines into one label's text. Safe because escaping leaves no newline in an
+/// `Escaped`, so the joins are the only line breaks in the result.
+pub fn join(lines: &[Escaped]) -> Escaped {
+    let mut out = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        if n > 0 {
+            out.push(Escaped::literal("\n"));
+        }
+        out.push(line.clone());
+    }
+    Escaped::concat(out)
 }
 
 /// Replace a label's text. Same guarantees as [`label`].
@@ -43,15 +69,18 @@ pub fn wrapped(text: &Escaped, classes: &[&str]) -> gtk::Label {
 /// A one-line label that ellipsizes rather than wrapping, so showing and hiding it never changes
 /// the height of the row it sits in.
 pub fn status(text: &Escaped, classes: &[&str]) -> gtk::Label {
-    let l = label(text, classes);
+    let l = plain(text, classes);
     l.set_wrap(false);
     l.set_ellipsize(gtk::pango::EllipsizeMode::End);
     l
 }
 
-/// A monospace, non-wrapping label for one rendered token or `NAME=value` line.
-pub fn mono_line(text: &Escaped) -> gtk::Label {
+/// A monospace, non-wrapping label for rendered tokens or `NAME=value` lines, one per line.
+pub fn mono_block(text: &Escaped, classes: &[&str]) -> gtk::Label {
     let l = label(text, &["pp-mono"]);
+    for c in classes {
+        l.add_css_class(c);
+    }
     l.set_wrap(false);
     l.set_ellipsize(gtk::pango::EllipsizeMode::None);
     l
@@ -64,7 +93,7 @@ pub fn button(text: &'static str, classes: &[&str]) -> gtk::Button {
     b.set_use_underline(false);
     b.set_can_focus(false);
     b.set_focus_on_click(false);
-    b.set_child(Some(&label(&Escaped::literal(text), &["pp-button-label"])));
+    b.set_child(Some(&plain(&Escaped::literal(text), &["pp-button-label"])));
     b.update_property(&[gtk::accessible::Property::Label(text)]);
     for c in classes {
         b.add_css_class(c);

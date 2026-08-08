@@ -31,6 +31,17 @@ pub fn passwd_name(uid: u32) -> Option<Vec<u8>> {
     Some(unsafe { CStr::from_ptr(p.pw_name) }.to_bytes().to_vec())
 }
 
+/// A user's home directory, for abbreviating their cwd in the prompt. Display only.
+pub fn passwd_home(uid: u32) -> Option<Vec<u8>> {
+    let p = passwd(uid)?;
+    if p.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: as above.
+    let dir = unsafe { CStr::from_ptr(p.pw_dir) }.to_bytes().to_vec();
+    (!dir.is_empty()).then_some(dir)
+}
+
 /// root's login shell, for the command environment's SHELL.
 pub fn root_shell() -> Vec<u8> {
     match passwd(0) {

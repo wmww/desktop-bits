@@ -82,11 +82,13 @@ impl Escaped {
 
     /// Escape untrusted bytes and shell-quote them, for rendering one argv token.
     pub fn shell_token(u: &Untrusted) -> Self {
-        let mut e = escape_bytes(&u.0, MAX_TOKEN_CHARS);
-        if needs_quoting(&u.0) {
-            e.text = format!("'{}'", e.text.replace('\'', "'\\''"));
-        }
-        e
+        quoted(u, |b| unquoted_ok(b))
+    }
+
+    /// A path for display. Quoted like a token, except that a `~` — which the gate substitutes for
+    /// the requester's home directory — is not on its own a reason to quote.
+    pub fn path(u: &Untrusted) -> Self {
+        quoted(u, |b| unquoted_ok(b) || *b == b'~')
     }
 
     /// `NAME=value`, both halves escaped.
@@ -109,14 +111,21 @@ impl Escaped {
     }
 }
 
+/// Escape, then single-quote unless every byte passes `ok`. Empty is always quoted: nothing on
+/// screen is worse than nothing on screen that looks like a missing value.
+fn quoted(u: &Untrusted, ok: impl Fn(&u8) -> bool) -> Escaped {
+    let mut e = escape_bytes(&u.0, MAX_TOKEN_CHARS);
+    if u.0.is_empty() || !u.0.iter().all(ok) {
+        e.text = format!("'{}'", e.text.replace('\'', "'\\''"));
+    }
+    e
+}
+
 /// Bytes that need no shell quoting to be read back as one token.
-fn needs_quoting(bytes: &[u8]) -> bool {
-    bytes.is_empty()
-        || bytes.iter().any(|b| {
-            !matches!(b,
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                | b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-')
-        })
+fn unquoted_ok(b: &u8) -> bool {
+    matches!(b,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+        | b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-')
 }
 
 /// How a single decoded character is rendered. `None` means "keep it verbatim".
@@ -319,6 +328,17 @@ mod tests {
         assert_eq!(q(b"it's"), "'it'\\''s'");
         assert_eq!(q(b"-l"), "-l");
         assert_eq!(q(b"$(x)"), "'$(x)'");
+        // `~` is a shell metacharacter, so an argv token containing one is still quoted.
+        assert_eq!(q(b"~/x"), "'~/x'");
+    }
+
+    #[test]
+    fn path_quoting_tolerates_the_substituted_tilde() {
+        let p = |b: &[u8]| Escaped::path(&Untrusted::from_bytes(b.to_vec())).text;
+        assert_eq!(p(b"~/desktop-bits"), "~/desktop-bits");
+        assert_eq!(p(b"/etc"), "/etc");
+        assert_eq!(p(b"~/my dir"), "'~/my dir'");
+        assert_eq!(p(b""), "''");
     }
 
     #[test]

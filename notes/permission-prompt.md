@@ -12,7 +12,7 @@ sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its pa
 sudo-prompt/verify.sh   read-only check of a deployed setup (setup itself is manual, see README)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-tests/gui-test.sh       21 behavioural checks in a nested sway
+tests/gui-test.sh       23 behavioural checks in a nested sway
 ~~~
 
 ## Goal and threat model
@@ -258,14 +258,31 @@ inode identity the gate cannot hold across the approval window.
 
 ### What the dialog says, and what it leaves out
 
-The prompt carries only what the decision needs. No field is labelled unless the label says
-something the reader could not infer: the gate is a heading, a trusted subtitle naming the
-requester, an unlabelled command box, and `in` / `env` gutter rows. There is no key-binding prose
-(Enter and Escape on a two-button dialog are not news), no "about this prompt" block on the gate,
-and no note explaining that root's own PATH/HOME/USER are set — `env` lists what the *caller* added,
-which is the only part anyone can act on. The generic presenter keeps its one compiled-in
-disclaimer, as the trusted subtitle, because "this is not the sudo gate" is exactly what a reader
-cannot infer.
+The prompt carries only what the decision needs. The gate is, top to bottom: the command, in the
+accent colour and larger than anything else; the interpreter warning when there is one; one flat
+line reading `user | cwd`; and an `env` gutter row when the request has one. No icon, no heading
+and no subtitle — the
+command *is* the question, and a sentence asking it in the gate's own words would only push the
+answer further down. The buttons ("Run as root" / "Cancel") say what the heading used to.
+
+`cwd` is abbreviated with `~` against the *requesting* user's passwd home directory, never root's;
+the uid and gid are not shown at all, since the name answers "was this me?" and the log record keeps
+the numbers. That line is the one piece of caller data rendered without a viewport around it: it is
+one short line by nature, it wraps rather than scrolls, and it is still escaped and capped
+(`Field::flat`).
+
+There is no key-binding prose (Enter and Escape on a two-button dialog are not news), no "about this
+prompt" block on the gate, and no note explaining that root's own PATH/HOME/USER are set — `env`
+lists what the caller *asked* for, which is the only part anyone can act on. The generic presenter does
+keep a heading and its one compiled-in disclaimer as the subtitle: it has no single thing it is
+about, and "this is not the sudo gate" is exactly what a reader cannot infer.
+
+Fields are one label each rather than one label per line, and selectable, so a command can be
+selected and copied in one go. That pulls two GTK behaviours in: labels are focusable, and a label
+the toolkit focuses selects all of itself — so `gtk-label-select-on-focus` is turned off in `init()`,
+or every prompt would come up showing a selection nobody made. Ctrl+C and Ctrl+Insert are the only
+keys the input state machine lets through to the focused widget; nothing else there is focusable, so
+they can copy text and cannot reach anything activatable.
 
 The one status line that stays is "controls unlock in a moment", which answers the question a
 greyed-out button raises. It is faded to opacity 0 rather than hidden once settled: a widget that
@@ -297,6 +314,9 @@ Two GTK details that cost an afternoon:
   not change how wide the content is.
 - The theme's scrollbar-slider minimum height is a floor under every viewport, which left a one-line
   field sitting in a three-line box. `.pp-viewport scrollbar slider { min-height: 14px }` removes it.
+- A `GtkGrid` hands its spare width to *every* column a spanning child covers, so the full-width
+  command field made the gutter column expand and stranded the `env` label a third of a dialog away
+  from its own box. The fields are plain rows now, with a fixed-width gutter.
 
 Hard ceilings: 4096 rendered characters per token, 512 lines and 64 KiB per field, each with an
 unmissable truncation marker — scrolling does not help if GTK is laying out a megabyte of argv.
@@ -323,8 +343,9 @@ unmissable truncation marker — scrolling does not help if GTK is laying out a 
   contradicts its own explicit "never on an input event". The explicit rule is what is implemented.)
 - Approval needs a fresh physical key *down* on `Return`/`KP_Enter`/`ISO_Enter`, or a pointer press
   delivered after settling. Escape denies. Held keycodes are tracked so a client-side autorepeat is
-  never a fresh press, and the set is cleared on focus loss. There are no focusable widgets, no
-  default action and no IM context.
+  never a fresh press, and the set is cleared on focus loss. The key controller stops every event in
+  the capture phase except Ctrl+C/Ctrl+Insert, which copies from the focused label; buttons set
+  `can-focus` off, so text is the only thing focus can reach. No default action, no IM context.
 
 ### Session lock discipline
 

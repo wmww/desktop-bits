@@ -19,13 +19,17 @@ GATE=$REPO/target/test-seams/debug/sudo-prompt
 GENERIC=$REPO/target/debug/permission-prompt
 KEEP=${1:-}
 
-# The Approve button's centre for the fixed `/bin/echo coord` request on a 1280x720 output. The
-# dialog is centred at its natural height, so *anything* that changes which fields that request
-# renders moves this: it dropped 27px when the env field stopped being drawn for a request that
-# sets no variables. A positive click test runs first, so a stale coordinate fails loudly instead
-# of silently passing.
-APPROVE_X=792
-APPROVE_Y=447
+# Points inside the fixed `/bin/echo coord` request's dialog on a 1280x720 output: the Approve
+# button's centre, and the two ends of a drag across the command field. The dialog is centred at
+# its natural height, so *anything* that changes which fields that request renders moves these —
+# they dropped 27px when the env field stopped being drawn for a request that sets no variables.
+# A positive click test runs first, so a stale coordinate fails loudly instead of silently passing.
+APPROVE_X=791
+APPROVE_Y=412
+COMMAND_X1=438
+COMMAND_Y1=300
+COMMAND_X2=700
+COMMAND_Y2=336
 
 pass=0; fail=0
 ok()   { echo "PASS  $1"; pass=$((pass+1)); }
@@ -54,18 +58,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Launch the gate inside the session and return once its prompt has settled.
-
 # Extra caller-side environment for one launch, to prove a variable is or is not forwarded.
 LAUNCH_ENV=""
 
+# Launch the gate inside the session and return once its prompt has settled.
+#
+# From `/`, always: the prompt shows the caller's cwd, so launching from the checkout would make the
+# dialog's width — and every coordinate above — depend on where the repo happens to live.
 launch() {
     rm -f "$DIR/gate.log" "$DIR/gate.status"
     local args="" a
     for a in "$@"; do args+=" $(printf '%q' "$a")"; done
     swaymsg exec "env $LAUNCH_ENV SUDO_UID=$(id -u) SUDO_GID=$(id -g) \
         SUDO_PROMPT_TEST_DISPLAY_ROOT=$DIR SUDO_PROMPT_TEST_LOCK_PATH=$DIR/lock RUST_LOG=debug \
-        sh -c '$GATE --$args >$DIR/gate.log 2>&1; echo \$? >$DIR/gate.status'" >/dev/null
+        sh -c 'cd /; $GATE --$args >$DIR/gate.log 2>&1; echo \$? >$DIR/gate.status'" >/dev/null
 }
 
 # Wait for the prompt to be answerable, or for the run to have finished.
@@ -181,6 +187,29 @@ else
     bad "press across settling" "status=$(status)"
 fi
 wdotool mousemove $APPROVE_X $APPROVE_Y click 1; finished >/dev/null
+
+# --- selecting and copying --------------------------------------------------
+if command -v wl-paste >/dev/null; then
+    launch /bin/echo coord; settled
+    wdotool mousemove $COMMAND_X1 $COMMAND_Y1 mousedown 1 \
+        mousemove $COMMAND_X2 $COMMAND_Y2 mouseup 1
+    wdotool key ctrl+c
+    sleep 0.5
+    # One label per field, so a single drag takes the whole command, not just the line under it.
+    if [[ $(timeout 3 wl-paste -n 2>/dev/null) == "/bin/echo
+coord" ]]; then
+        ok "a drag selects the whole command and Ctrl+C copies it"
+    else
+        bad "select and copy" "clipboard held '$(timeout 3 wl-paste -n 2>/dev/null)'; log: $(gatelog | tail -3)"
+    fi
+    # Copying must not have answered the prompt.
+    if [[ -z $(status) ]]; then
+        ok "Ctrl+C does not answer the prompt"
+    else
+        bad "copy is not a verdict" "status=$(status)"
+    fi
+    wdotool key Escape; finished >/dev/null
+fi
 
 # --- the locks --------------------------------------------------------------
 launch /bin/echo first; settled

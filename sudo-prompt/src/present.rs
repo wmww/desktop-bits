@@ -8,7 +8,7 @@ use crate::cli::Request;
 use crate::cmdenv::{CommandEnv, Provenance};
 use crate::interp::Interpreter;
 
-const HEADING: &str = "Run a command as root?";
+const TITLE: &str = "Run a command as root?";
 const APPROVE: &str = "Run as root";
 const DENY: &str = "Cancel";
 
@@ -27,23 +27,6 @@ pub fn build(
 ) -> Rendered {
     let mut fields = Vec::new();
 
-    // Who asked is the only thing separating "I typed this" from "the agent typed this", so it sits
-    // in the trusted header, under the heading and never adjacent to caller-controlled text.
-    let subtitle = vec![Escaped::concat([
-        Escaped::literal("requested by uid "),
-        Escaped::number(prov.uid as u64),
-        Escaped::literal(" ("),
-        Escaped::of(&Untrusted::from_bytes(prov.user.clone())),
-        Escaped::literal("), gid "),
-        Escaped::number(prov.gid as u64),
-    ])];
-
-    if let Some(i) = interp {
-        fields.push(Field::warning(
-            crate::interp::prose(i).into_iter().map(Escaped::literal).collect(),
-        ));
-    }
-
     // Display argv exactly as requested: one shell-quoted token per line, no resolution. A
     // resolved path would promise an inode identity the gate cannot hold across the approval
     // window.
@@ -53,16 +36,36 @@ pub fn build(
     }
     let command_log =
         tokens.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" ");
-    // Unlabelled: it sits directly under the heading that asks about it.
-    fields.push(Field::untrusted("", tokens).expanding());
+    // First and loudest, with no heading above it: the command *is* the question, and a sentence
+    // asking it in the gate's own words would only push the answer further down.
+    fields.push(Field::untrusted("", tokens).expanding().prominent());
 
-    fields.push(Field::untrusted(
-        "in",
-        vec![match cwd {
-            Some(c) => Escaped::shell_token(&Untrusted::from_bytes(c.to_vec())),
-            None => Escaped::literal("(unavailable)"),
-        }],
-    ));
+    // Directly under the command, because it changes what the command means.
+    if let Some(i) = interp {
+        fields.push(Field::warning(
+            crate::interp::prose(i).into_iter().map(Escaped::literal).collect(),
+        ));
+    }
+
+    // Who asked and where from, on one line: both answer "is this the shell I am looking at?", and
+    // uid/gid are noise next to the name — the log keeps the numbers. Flat rather than boxed: one
+    // short line of context does not need a viewport around it.
+    fields.push(
+        Field::untrusted(
+            "",
+            vec![Escaped::concat([
+                Escaped::of(&Untrusted::from_bytes(prov.user.clone())),
+                Escaped::literal(" | "),
+                match cwd {
+                    Some(c) => {
+                        Escaped::path(&Untrusted::from_bytes(abbreviate(c, prov.home.as_deref())))
+                    }
+                    None => Escaped::literal("(cwd unavailable)"),
+                },
+            ])],
+        )
+        .flat(),
+    );
 
     // Only what the request asked for. The gate constructs the rest itself, and the one inherited
     // variable (TERM) is ambient shell state present on every request — listing it put three lines
@@ -100,14 +103,33 @@ pub fn build(
     Rendered {
         spec: DialogSpec {
             style: Style::Gate,
-            heading: HEADING,
-            subtitle,
-            icon: Some("dialog-warning-symbolic".to_string()),
+            title: TITLE,
+            heading: None,
+            subtitle: Vec::new(),
             fields,
             approve: APPROVE,
             deny: DENY,
         },
         command_log,
+    }
+}
+
+/// `~` for the *requesting* user's home directory — never root's, which is the gate's own HOME and
+/// has nothing to do with where the request came from.
+fn abbreviate(cwd: &[u8], home: Option<&[u8]>) -> Vec<u8> {
+    let Some(home) = home.filter(|h| !h.is_empty() && *h != b"/") else {
+        return cwd.to_vec();
+    };
+    if cwd == home {
+        return b"~".to_vec();
+    }
+    match cwd.strip_prefix(home) {
+        Some(rest) if rest.starts_with(b"/") => {
+            let mut out = b"~".to_vec();
+            out.extend_from_slice(rest);
+            out
+        }
+        _ => cwd.to_vec(),
     }
 }
 
@@ -118,9 +140,18 @@ mod tests {
     use permission_prompt_ui::dialog::FieldKind;
     use std::ffi::OsString;
 
+    fn prov() -> Provenance {
+        Provenance {
+            uid: 1006,
+            gid: 1007,
+            user: b"ai".to_vec(),
+            home: Some(b"/home/ai".to_vec()),
+        }
+    }
+
     fn render(argv: &[&str]) -> Rendered {
         let req = cli::parse(&argv.iter().map(OsString::from).collect::<Vec<_>>()).unwrap();
-        let prov = Provenance { uid: 1006, gid: 1007, user: b"ai".to_vec() };
+        let prov = prov();
         // A realistic capture: TERM is present on every request a real caller makes.
         let cap = crate::envsetup::Captured {
             passthrough: vec![(b"TERM".to_vec(), b"xterm-256color".to_vec())],
@@ -129,16 +160,25 @@ mod tests {
         let env = crate::cmdenv::build(&cap, &req, &prov, b"/bin/bash");
         let interp = crate::interp::is_interpreter(&req)
             .then(|| crate::interp::scan(&req.args).unwrap());
-        build(&req, interp.as_ref(), &prov, Some(b"/home/ai"), &env)
+        build(&req, interp.as_ref(), &prov, Some(b"/home/ai/desktop-bits"), &env)
     }
 
     fn field<'a>(r: &'a Rendered, label: &str) -> &'a Field {
         r.spec.fields.iter().find(|f| f.label == label).expect("field present")
     }
 
-    /// The command field carries no label: it is the one field that expands.
+    /// The command: the one prominent field, and the one that expands.
     fn command(r: &Rendered) -> &Field {
-        r.spec.fields.iter().find(|f| f.expand).expect("command field present")
+        r.spec.fields.iter().find(|f| f.prominent).expect("command field present")
+    }
+
+    /// The unlabelled line naming who asked and from where.
+    fn origin(r: &Rendered) -> &Field {
+        r.spec
+            .fields
+            .iter()
+            .find(|f| f.kind == FieldKind::Untrusted && f.label.is_empty() && !f.prominent)
+            .expect("origin field present")
     }
 
     #[test]
@@ -148,10 +188,53 @@ mod tests {
         assert_eq!(command(&r).label, "");
     }
 
+    /// Nothing above the command: no icon, no heading, no subtitle.
     #[test]
-    fn requesting_uid_is_rendered_in_the_trusted_header() {
+    fn the_command_is_the_first_thing_on_screen() {
+        let r = render(&["--", "/usr/bin/ls", "-l"]);
+        assert_eq!(r.spec.heading, None);
+        assert!(r.spec.subtitle.is_empty());
+        assert!(std::ptr::eq(&r.spec.fields[0], command(&r)));
+        assert!(command(&r).expand);
+    }
+
+    #[test]
+    fn the_requester_and_their_cwd_share_one_line() {
         let r = render(&["--", "id"]);
-        assert_eq!(r.spec.subtitle[0].as_str(), "requested by uid 1006 (ai), gid 1007");
+        assert_eq!(origin(&r).lines.len(), 1);
+        assert_eq!(origin(&r).lines[0].as_str(), "ai | ~/desktop-bits");
+    }
+
+    #[test]
+    fn the_cwd_is_abbreviated_against_the_requesters_home_not_roots() {
+        let home = Some(&b"/home/ai"[..]);
+        assert_eq!(abbreviate(b"/home/ai", home), b"~");
+        assert_eq!(abbreviate(b"/home/ai/src", home), b"~/src");
+        assert_eq!(abbreviate(b"/root", home), b"/root");
+        // A prefix that is not a path component boundary is not the home directory.
+        assert_eq!(abbreviate(b"/home/aid", home), b"/home/aid");
+        // No usable home: shown as it is, never abbreviated against `/`.
+        assert_eq!(abbreviate(b"/etc", None), b"/etc");
+        assert_eq!(abbreviate(b"/etc", Some(b"/")), b"/etc");
+        assert_eq!(abbreviate(b"/etc", Some(b"")), b"/etc");
+    }
+
+    #[test]
+    fn an_odd_cwd_is_quoted_but_a_tilde_alone_is_not() {
+        let quoted = |cwd: &[u8]| {
+            let req = cli::parse(&[OsString::from("--"), OsString::from("id")]).unwrap();
+            let env = crate::cmdenv::build(
+                &crate::envsetup::Captured::default(),
+                &req,
+                &prov(),
+                b"/bin/sh",
+            );
+            let r = build(&req, None, &prov(), Some(cwd), &env);
+            origin(&r).lines[0].as_str().to_string()
+        };
+        assert_eq!(quoted(b"/home/ai"), "ai | ~");
+        assert_eq!(quoted(b"/home/ai/a b"), "ai | '~/a b'");
+        assert_eq!(quoted(b"/tmp/x\ny"), "ai | '/tmp/x\\x0ay'");
     }
 
     #[test]
@@ -210,7 +293,7 @@ mod tests {
     #[test]
     fn a_dropped_passthrough_is_still_noted() {
         let req = cli::parse(&[OsString::from("--"), OsString::from("id")]).unwrap();
-        let prov = Provenance { uid: 1, gid: 1, user: b"x".to_vec() };
+        let prov = Provenance { uid: 1, gid: 1, user: b"x".to_vec(), home: None };
         let cap = crate::envsetup::Captured {
             passthrough: vec![(b"TERM".to_vec(), b"../../tmp/evil".to_vec())],
             ..Default::default()
@@ -224,9 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn interpreter_requests_get_a_trusted_warning() {
+    fn interpreter_requests_get_a_trusted_warning_under_the_command() {
         let r = render(&["--", "/usr/bin/sudo", "-u", "ff", "id"]);
-        let w = r.spec.fields.iter().find(|f| f.kind == FieldKind::Warning).expect("warning");
+        let w = &r.spec.fields[1];
+        assert_eq!(w.kind, FieldKind::Warning);
         assert!(w.lines.iter().any(|l| l.as_str().contains("second sudo")));
         assert!(w.lines.iter().any(|l| l.as_str().contains("as another user")));
         // The path stays in the command field with the rest of the argv.
@@ -242,9 +326,9 @@ mod tests {
     #[test]
     fn missing_cwd_is_named_rather_than_left_blank() {
         let req = cli::parse(&[OsString::from("--"), OsString::from("id")]).unwrap();
-        let prov = Provenance { uid: 1, gid: 1, user: b"x".to_vec() };
+        let prov = Provenance { uid: 1, gid: 1, user: b"x".to_vec(), home: None };
         let env = crate::cmdenv::build(&crate::envsetup::Captured::default(), &req, &prov, b"/bin/sh");
         let r = build(&req, None, &prov, None, &env);
-        assert_eq!(field(&r, "in").lines[0].as_str(), "(unavailable)");
+        assert_eq!(origin(&r).lines[0].as_str(), "x | (cwd unavailable)");
     }
 }

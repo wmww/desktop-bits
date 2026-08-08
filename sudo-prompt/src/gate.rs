@@ -138,7 +138,7 @@ fn provenance(cap: &Captured) -> Result<Provenance, String> {
             ));
         }
     }
-    Ok(Provenance { uid, gid, user })
+    Ok(Provenance { uid, gid, user, home: sys::passwd_home(uid) })
 }
 
 fn parse_id(value: Option<&[u8]>, name: &str) -> Result<u32, String> {

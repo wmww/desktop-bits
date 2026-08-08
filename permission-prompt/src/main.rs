@@ -43,10 +43,6 @@ struct Args {
     #[arg(long = "detail")]
     details: Vec<String>,
 
-    /// Icon name shown beside the heading.
-    #[arg(long)]
-    icon: Option<String>,
-
     /// Surface to present on. `auto` tries session lock, then layer shell, then an xdg toplevel.
     #[arg(long, default_value = "auto")]
     surface: String,
@@ -106,7 +102,7 @@ fn spec(args: &Args) -> DialogSpec {
     // it came from the caller.
     let mut fields = Vec::new();
     if let Some(title) = &args.title {
-        fields.push(Field::untrusted("", vec![escape(title)]));
+        fields.push(Field::untrusted("", vec![escape(title)]).prominent());
     }
     if let Some(body) = &args.body {
         fields.push(Field::untrusted("", lines(body)).expanding());
@@ -120,9 +116,10 @@ fn spec(args: &Args) -> DialogSpec {
 
     DialogSpec {
         style: Style::Generic,
-        heading: HEADING,
+        title: HEADING,
+        // Unlike the gate, this prompt has no one thing it is about, so it says what it is.
+        heading: Some(HEADING),
         subtitle: vec![Escaped::literal(DISCLAIMER)],
-        icon: args.icon.clone().or_else(|| Some("dialog-question-symbolic".to_string())),
         fields,
         approve: APPROVE,
         deny: DENY,

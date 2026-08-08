@@ -1,10 +1,10 @@
 //! Dialog layout. Trusted fields and buttons sit outside every viewport and keep their natural
 //! size; caller-controlled fields live in bounded scrolling viewports and are what shrinks.
 //!
-//! The layout is deliberately spare: a heading, a trusted subtitle, and a two-column grid of
-//! short gutter labels against their values. Anything the reader can infer from the shape of the
-//! dialog — that Enter answers it, that the big box is the thing being asked about — is not
-//! written out.
+//! The layout is deliberately spare: an optional heading and trusted subtitle, then a two-column
+//! grid of short gutter labels against their values. Anything the reader can infer from the shape
+//! of the dialog — that Enter answers it, that the big accented box at the top is the thing being
+//! asked about — is not written out.
 
 use gtk::prelude::*;
 
@@ -16,6 +16,9 @@ use crate::untrusted::Escaped;
 /// still shrinks to nothing when the output cannot fit the dialog.
 const MAX_VIEWPORT_HEIGHT: i32 = 120;
 const MAX_EXPANDED_HEIGHT: i32 = 360;
+
+/// Width of the gutter the short field labels sit in.
+const GUTTER_WIDTH: i32 = 30;
 
 /// Hard ceiling on rendered lines in one caller-controlled field.
 pub const MAX_FIELD_LINES: usize = 512;
@@ -50,24 +53,56 @@ pub struct Field {
     /// This field may grow much taller than the others before it scrolls. Mark the field the
     /// reader most needs room for.
     pub expand: bool,
+    /// Render this field larger and in the dialog's accent colour. At most one field per dialog:
+    /// it is what the reader is being asked about.
+    pub prominent: bool,
+    /// Drop the viewport chrome and set this field as plain running text. Only for a field that
+    /// is one short line by nature: it wraps rather than scrolls, so it stays bounded, but it has
+    /// no box around it saying "caller data". See [`Field::flat`].
+    pub flat: bool,
 }
 
 impl Field {
     pub fn trusted(label: &'static str, lines: Vec<Escaped>) -> Self {
-        Field { label, lines, kind: FieldKind::Trusted, notes: Vec::new(), expand: false }
+        Field::new(label, lines, FieldKind::Trusted)
     }
 
     pub fn warning(lines: Vec<Escaped>) -> Self {
-        Field { label: "", lines, kind: FieldKind::Warning, notes: Vec::new(), expand: false }
+        Field::new("", lines, FieldKind::Warning)
     }
 
     pub fn untrusted(label: &'static str, lines: Vec<Escaped>) -> Self {
-        Field { label, lines, kind: FieldKind::Untrusted, notes: Vec::new(), expand: false }
+        Field::new(label, lines, FieldKind::Untrusted)
+    }
+
+    fn new(label: &'static str, lines: Vec<Escaped>, kind: FieldKind) -> Self {
+        Field {
+            label,
+            lines,
+            kind,
+            notes: Vec::new(),
+            expand: false,
+            prominent: false,
+            flat: false,
+        }
     }
 
     /// Give this field the leftover vertical space. See [`Field::expand`].
     pub fn expanding(mut self) -> Self {
         self.expand = true;
+        self
+    }
+
+    /// Make this the field the eye lands on first. See [`Field::prominent`].
+    pub fn prominent(mut self) -> Self {
+        self.prominent = true;
+        self
+    }
+
+    /// Render as plain running text rather than in a viewport. Still escaped, still capped, and it
+    /// wraps rather than growing the dialog, so what it gives up is the box, not a bound.
+    pub fn flat(mut self) -> Self {
+        self.flat = true;
         self
     }
 
@@ -79,11 +114,13 @@ impl Field {
 
 pub struct DialogSpec {
     pub style: Style,
-    pub heading: &'static str,
-    /// Trusted lines under the heading: who is asking, or what this prompt is not.
+    /// Window title, and the heading when there is one. Never caller data.
+    pub title: &'static str,
+    /// Heading above the fields. `None` when the first field says it better than a heading could:
+    /// the gate leads with the command itself rather than a sentence about it.
+    pub heading: Option<&'static str>,
+    /// Trusted lines under the heading: what this prompt is not.
     pub subtitle: Vec<Escaped>,
-    /// Icon name to show beside the heading. A name, not text: it cannot render caller prose.
-    pub icon: Option<String>,
     pub fields: Vec<Field>,
     pub approve: &'static str,
     pub deny: &'static str,
@@ -124,17 +161,16 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     // the caller-controlled viewports — minimum height zero — are what gives.
     dialog.set_valign(gtk::Align::Center);
 
-    dialog.append(&build_header(spec));
-
-    let grid = gtk::Grid::new();
-    grid.add_css_class("pp-fields");
-    grid.set_row_spacing(6);
-    grid.set_column_spacing(10);
-    let mut row = 0;
-    for field in &spec.fields {
-        row = attach_field(&grid, field, row);
+    if let Some(header) = build_header(spec) {
+        dialog.append(&header);
     }
-    dialog.append(&grid);
+
+    let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    fields.add_css_class("pp-fields");
+    for field in &spec.fields {
+        fields.append(&build_field(field));
+    }
+    dialog.append(&fields);
 
     // The settling message shares the buttons' row: on a cramped output every line of fixed
     // chrome is a line the buttons might not get.
@@ -159,49 +195,46 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     d
 }
 
-fn build_header(spec: &DialogSpec) -> gtk::Widget {
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+/// The heading and subtitle, or nothing at all when the dialog has neither. No icon: a picture of
+/// a warning triangle tells the reader nothing the command itself does not.
+fn build_header(spec: &DialogSpec) -> Option<gtk::Widget> {
+    if spec.heading.is_none() && spec.subtitle.is_empty() {
+        return None;
+    }
+    let header = gtk::Box::new(gtk::Orientation::Vertical, 2);
     header.add_css_class("pp-header");
-    if let Some(name) = &spec.icon {
-        let image = gtk::Image::from_icon_name(name);
-        image.set_icon_size(gtk::IconSize::Large);
-        image.set_valign(gtk::Align::Start);
-        header.append(&image);
+    if let Some(heading) = spec.heading {
+        header.append(&text::wrapped(&Escaped::literal(heading), &["pp-heading"]));
     }
-    let titles = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    titles.append(&text::wrapped(&Escaped::literal(spec.heading), &["pp-heading"]));
-    for line in &spec.subtitle {
-        titles.append(&text::wrapped(line, &["pp-subtitle"]));
+    if !spec.subtitle.is_empty() {
+        header.append(&text::wrapped(&text::join(&spec.subtitle), &["pp-subtitle"]));
     }
-    header.append(&titles);
-    header.upcast()
+    Some(header.upcast())
 }
 
-/// Attach one field's rows to the grid and return the next free row.
+/// One field: its value and notes in a column, with a short gutter label beside them if it has one.
 ///
-/// A labelled field puts its short label in the gutter and its value beside it; an unlabelled one
-/// spans both columns, so a dialog with no labels at all wastes no width on an empty gutter.
-fn attach_field(grid: &gtk::Grid, field: &Field, mut row: i32) -> i32 {
+/// Rows rather than a grid, because a grid gives its spare width to every column a spanning child
+/// covers — which left the gutter label stranded a third of the dialog away from its own value.
+/// A fixed gutter width keeps the labels lined up with each other instead.
+fn build_field(field: &Field) -> gtk::Widget {
     let (value, notes) = build_value(field);
-    value.set_hexpand(true);
-    if field.label.is_empty() {
-        grid.attach(&value, 0, row, 2, 1);
-    } else {
-        let label = text::label(&Escaped::literal(field.label), &["pp-field-label"]);
-        label.set_valign(gtk::Align::Start);
-        grid.attach(&label, 0, row, 1, 1);
-        grid.attach(&value, 1, row, 1, 1);
-    }
-    row += 1;
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    column.set_hexpand(true);
+    column.append(&value);
     for note in notes {
-        if field.label.is_empty() {
-            grid.attach(&note, 0, row, 2, 1);
-        } else {
-            grid.attach(&note, 1, row, 1, 1);
-        }
-        row += 1;
+        column.append(&note);
     }
-    row
+    if field.label.is_empty() {
+        return column.upcast();
+    }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = text::label(&Escaped::literal(field.label), &["pp-field-label"]);
+    label.set_valign(gtk::Align::Start);
+    label.set_size_request(GUTTER_WIDTH, -1);
+    row.append(&label);
+    row.append(&column);
+    row.upcast()
 }
 
 /// The field's value widget, plus any note rows that belong under it.
@@ -215,14 +248,27 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
     for line in &lines {
         escaped_any |= line.was_escaped();
         truncated_any |= line.was_truncated();
-        match field.kind {
-            FieldKind::Trusted => content.append(&text::wrapped(line, &["pp-trusted-value"])),
-            FieldKind::Warning => content.append(&text::wrapped(line, &["pp-warning-value"])),
-            FieldKind::Untrusted => content.append(&text::mono_line(line)),
-        }
+    }
+    // One label for the whole field, not one per line: a selection cannot cross widgets, and the
+    // reader who wants the command wants all of it.
+    let joined = text::join(&lines);
+    let mut classes = vec![match field.kind {
+        FieldKind::Trusted => "pp-trusted-value",
+        FieldKind::Warning => "pp-warning-value",
+        FieldKind::Untrusted => "pp-untrusted-value",
+    }];
+    if field.prominent {
+        classes.push("pp-prominent");
+    }
+    if field.flat {
+        classes.push("pp-flat");
     }
     if lines.is_empty() {
         content.append(&text::label(&Escaped::literal("(none)"), &["pp-empty"]));
+    } else if field.kind == FieldKind::Untrusted && !field.flat {
+        content.append(&text::mono_block(&joined, &classes));
+    } else {
+        content.append(&text::wrapped(&joined, &classes));
     }
 
     let mut notes: Vec<gtk::Widget> = Vec::new();
@@ -250,6 +296,7 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
 
     let value: gtk::Widget = match field.kind {
         FieldKind::Trusted | FieldKind::Warning => content.upcast(),
+        FieldKind::Untrusted if field.flat => content.upcast(),
         FieldKind::Untrusted => {
             let scroller = gtk::ScrolledWindow::new();
             scroller.add_css_class("pp-viewport");
@@ -379,6 +426,14 @@ window.pp-window { background-color: #0a0b0f; }
 .pp-trusted-value { font-size: 1.0em; }
 .pp-warning-value { color: #ffb27a; }
 .pp-mono { font-family: monospace; font-size: 0.95em; color: #d7dbe6; }
+/* The one field the reader is being asked about. */
+.pp-prominent { font-size: 1.3em; font-weight: bold; }
+.pp-dialog.pp-gate .pp-prominent { color: #ff9b6a; }
+.pp-dialog.pp-generic .pp-prominent { color: #8ab4f8; }
+/* Caller data outside a viewport: quieter than the boxed fields, never louder. */
+.pp-flat { font-family: monospace; font-size: 1.05em; color: #98a0b3; }
+/* Every field is selectable, so the selection has to be legible on the viewport background. */
+.pp-dialog selection { background-color: #35405c; color: #f2f5ff; }
 .pp-viewport {
   background-color: #0d0e13;
   border: 1px solid #22252e;

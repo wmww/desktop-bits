@@ -38,6 +38,9 @@ pub struct Provenance {
     pub uid: u32,
     pub gid: u32,
     pub user: Vec<u8>,
+    /// The requester's home directory from passwd, for abbreviating their cwd. Never used for the
+    /// command's HOME, which is root's.
+    pub home: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +180,7 @@ mod tests {
     }
 
     fn prov() -> Provenance {
-        Provenance { uid: 1006, gid: 1007, user: b"ai".to_vec() }
+        Provenance { uid: 1006, gid: 1007, user: b"ai".to_vec(), home: Some(b"/home/ai".to_vec()) }
     }
 
     fn req(assignments: &[(&str, &str)], command: &str, args: &[&str]) -> Request {

@@ -93,6 +93,13 @@ pub fn install_panic_hook() {
 
 pub fn init() -> Result<(), String> {
     gtk::init().map_err(|e| format!("GTK initialization failed: {e}"))?;
+    if let Some(settings) = gtk::Settings::default() {
+        // The fields are selectable, and GTK's default is that a label selects all of itself when
+        // the toolkit gives it focus — which it does to the first focusable widget the moment the
+        // window has keyboard focus. The prompt would then come up showing a selection the reader
+        // never made.
+        settings.set_gtk_label_select_on_focus(false);
+    }
     Ok(())
 }
 
@@ -263,7 +270,7 @@ fn install_settle_timer(state: &State) {
 fn new_window(cfg: &Rc<PromptConfig>, state: &State) -> (gtk::Window, Rc<Dialog>) {
     let window = gtk::Window::new();
     window.add_css_class("pp-window");
-    window.set_title(Some(cfg.spec.heading));
+    window.set_title(Some(cfg.spec.title));
 
     let d = Rc::new(dialog::build(&cfg.spec));
     if let Some(shown) = state.borrow().shown_settled {
@@ -296,6 +303,12 @@ fn new_window(cfg: &Rc<PromptConfig>, state: &State) -> (gtk::Window, Rc<Dialog>
     fit.set_min_content_height(0);
     window.set_child(Some(&fit));
 
+    // Selectable labels are focusable, so the toolkit hands focus to one as soon as the window has
+    // keyboard focus — and a label focused by the toolkit rather than by a click selects all of
+    // itself, showing the reader a selection they never made. Nothing here should hold focus until
+    // they click something.
+    window.connect_map(|w| drop_focus(w));
+
     wire_input(&window, &d, state);
     wire_presentation(&window, state);
     wire_destroy(&window, state);
@@ -308,7 +321,7 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed({
         let state = state.clone();
-        move |_, keyval, keycode, _| {
+        move |_, keyval, keycode, modifiers| {
             let mut st = state.borrow_mut();
             let now = Instant::now();
             // Insert before the settled check: a key held from before settling must still be
@@ -323,6 +336,12 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
                     gdk::Key::Escape => st.finish(Verdict::Denied),
                     _ => {}
                 }
+            }
+            if is_copy(keyval, modifiers) {
+                // The one combination allowed through to the focused widget. Only a label can
+                // hold focus — buttons set `can-focus` off — so this can copy text and nothing
+                // else; it cannot reach an activatable widget.
+                return glib::Propagation::Proceed;
             }
             // Nothing else may turn a keystroke into an activation.
             glib::Propagation::Stop
@@ -375,11 +394,30 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
             let mut st = state.borrow_mut();
             if w.is_active() {
                 st.settle.restart(Instant::now());
+                drop(st);
+                // The toolkit gives a focusable widget focus whenever the window gains it.
+                drop_focus(w);
             } else {
                 st.held.clear();
             }
         }
     });
+}
+
+/// Leave nothing focused, once the toolkit has finished deciding what to focus. Deferred to an
+/// idle because the assignment happens after both the map and the active notification.
+fn drop_focus(window: &gtk::Window) {
+    let window = window.clone();
+    glib::idle_add_local_once(move || {
+        gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+    });
+}
+
+/// Ctrl+C or Ctrl+Insert: copy the selection. Ctrl+A is deliberately not here — a select-all the
+/// reader did not aim at hides which field they are about to copy.
+fn is_copy(keyval: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && matches!(keyval, gdk::Key::c | gdk::Key::C | gdk::Key::Insert | gdk::Key::KP_Insert)
 }
 
 /// Start the quiet period when a surface is actually presented, not when it was created.
