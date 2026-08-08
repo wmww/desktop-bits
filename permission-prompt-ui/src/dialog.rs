@@ -131,6 +131,10 @@ pub struct Dialog {
     pub root: gtk::Widget,
     pub approve: gtk::Button,
     pub deny: gtk::Button,
+    /// The prominent field's value label, when the spec has one. Exposed so the presented-geometry
+    /// log lines (see `app::log_geometry`) can name it; the GUI tests derive drag targets from
+    /// those lines instead of hardcoding layout.
+    pub prominent: Option<gtk::Label>,
     /// Says why the controls are dead. Faded out rather than hidden once they are not: a widget
     /// that stops taking space would move the buttons at the instant they become live, and
     /// whatever the pointer was over could become the other button.
@@ -167,8 +171,13 @@ pub fn build(spec: &DialogSpec) -> Dialog {
 
     let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
     fields.add_css_class("pp-fields");
+    let mut prominent = None;
     for field in &spec.fields {
-        fields.append(&build_field(field));
+        let (widget, body) = build_field(field);
+        fields.append(&widget);
+        if field.prominent {
+            prominent = body;
+        }
     }
     dialog.append(&fields);
 
@@ -190,7 +199,7 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     bottom.append(&approve);
     dialog.append(&bottom);
 
-    let d = Dialog { root: dialog.upcast(), approve, deny, settling };
+    let d = Dialog { root: dialog.upcast(), approve, deny, prominent, settling };
     d.set_settled(false);
     d
 }
@@ -213,12 +222,13 @@ fn build_header(spec: &DialogSpec) -> Option<gtk::Widget> {
 }
 
 /// One field: its value and notes in a column, with a short gutter label beside them if it has one.
+/// Also returns the value's own label, for [`Dialog::prominent`].
 ///
 /// Rows rather than a grid, because a grid gives its spare width to every column a spanning child
 /// covers — which left the gutter label stranded a third of the dialog away from its own value.
 /// A fixed gutter width keeps the labels lined up with each other instead.
-fn build_field(field: &Field) -> gtk::Widget {
-    let (value, notes) = build_value(field);
+fn build_field(field: &Field) -> (gtk::Widget, Option<gtk::Label>) {
+    let (value, notes, body) = build_value(field);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
     column.set_hexpand(true);
     column.append(&value);
@@ -226,7 +236,7 @@ fn build_field(field: &Field) -> gtk::Widget {
         column.append(&note);
     }
     if field.label.is_empty() {
-        return column.upcast();
+        return (column.upcast(), body);
     }
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let label = text::label(&Escaped::literal(field.label), &["pp-field-label"]);
@@ -234,11 +244,12 @@ fn build_field(field: &Field) -> gtk::Widget {
     label.set_size_request(GUTTER_WIDTH, -1);
     row.append(&label);
     row.append(&column);
-    row.upcast()
+    (row.upcast(), body)
 }
 
-/// The field's value widget, plus any note rows that belong under it.
-fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
+/// The field's value widget, any note rows that belong under it, and the label holding the value
+/// text itself.
+fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>, Option<gtk::Label>) {
     let (lines, capped) = cap(&field.lines);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("pp-field-content");
@@ -272,7 +283,9 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
         content.append(&l);
         body = Some(l);
     } else {
-        content.append(&text::wrapped(&joined, &classes));
+        let l = text::wrapped(&joined, &classes);
+        content.append(&l);
+        body = Some(l);
     }
 
     let mut notes: Vec<gtk::Widget> = Vec::new();
@@ -336,7 +349,7 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>) {
             overlay.upcast()
         }
     };
-    (value, notes)
+    (value, notes, body)
 }
 
 /// Apply the per-field ceilings. Returns the lines to render and whether anything was dropped.

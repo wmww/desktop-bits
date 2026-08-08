@@ -257,6 +257,8 @@ fn install_settle_timer(state: &State) {
                 let settled = st.settle.is_settled();
                 if st.shown_settled != Some(settled) {
                     st.shown_settled = Some(settled);
+                    // The tests key on this line to know when the prompt is answerable.
+                    log::debug!("controls {}", if settled { "live" } else { "settling" });
                     for (_, d) in &st.windows {
                         d.set_settled(settled);
                     }
@@ -310,7 +312,7 @@ fn new_window(cfg: &Rc<PromptConfig>, state: &State) -> (gtk::Window, Rc<Dialog>
     window.connect_map(|w| drop_focus(w));
 
     wire_input(&window, &d, state);
-    wire_presentation(&window, state);
+    wire_presentation(&window, &d, state);
     wire_destroy(&window, state);
     (window, d)
 }
@@ -426,10 +428,11 @@ fn is_copy(keyval: gdk::Key, modifiers: gdk::ModifierType) -> bool {
 /// first commit, so a second tick means the compositor is really presenting this surface. A
 /// DPMS-blanked output never gets there, which is the point: the keypress that wakes the display
 /// must not approve an invisible prompt.
-fn wire_presentation(window: &gtk::Window, state: &State) {
+fn wire_presentation(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
     let ticks = Cell::new(0u32);
+    let d = d.clone();
     let state = state.clone();
-    window.add_tick_callback(move |_, _| {
+    window.add_tick_callback(move |window, _| {
         ticks.set(ticks.get() + 1);
         if ticks.get() < 2 {
             return glib::ControlFlow::Continue;
@@ -438,9 +441,31 @@ fn wire_presentation(window: &gtk::Window, state: &State) {
         if st.verdict.is_none() {
             log::debug!("surface presented; (re)starting the quiet period");
             st.settle.restart(Instant::now());
+            log_geometry(window, &d);
         }
         glib::ControlFlow::Break
     });
+}
+
+/// Where the controls landed on this surface, window-relative. The GUI tests derive their click
+/// and drag targets from these lines, so layout changes never invalidate the tests.
+fn log_geometry(window: &gtk::Window, d: &Dialog) {
+    let one = |name: &str, widget: &gtk::Widget| {
+        if let Some(b) = widget.compute_bounds(window) {
+            log::debug!(
+                "geometry: {name} {} {} {} {}",
+                b.x().round() as i32,
+                b.y().round() as i32,
+                b.width().round() as i32,
+                b.height().round() as i32
+            );
+        }
+    };
+    one("approve", d.approve.upcast_ref());
+    one("deny", d.deny.upcast_ref());
+    if let Some(p) = &d.prominent {
+        one("prominent", p.upcast_ref());
+    }
 }
 
 /// The session lock library destroys a window when its monitor goes away or the lock ends.

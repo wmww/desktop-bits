@@ -431,6 +431,16 @@ Two Cargo features, neither enabled in an installed binary:
 the *real* gate parser and interpreter whitelist with the shim's own output, so the two lists cannot
 drift apart.
 
+The GUI harness never hardcodes layout or tuned sleeps — both broke on unrelated UI changes. The
+prompt logs, at debug level, `geometry: <approve|deny|prominent> X Y W H` (window-relative, logged
+at presentation) and `controls <live|settling>` on every settle transition; the script derives its
+click and drag targets from the geometry lines and waits on log markers (`controls live`,
+`surface presented`, `monitor removed`, `session locked`/`unlocked` from a debug-logged
+`permission-prompt`) instead of sleeping. Change the dialog freely; only renaming those log lines
+or the behaviour itself breaks the suite. (The old fixed sleeps flaked about one run in six on the
+hotplug checks — the `sleep 2` after `create_output` could return before the second lock surface
+was up, so the unplug raced the plug and could tear down the prompt's only surface.)
+
 ## Out of scope, deliberately
 
 Remembered decisions and timestamps, tty fallback, any password-authenticated sudo path, PAM command

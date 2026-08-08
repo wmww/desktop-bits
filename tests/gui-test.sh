@@ -19,18 +19,6 @@ GATE=$REPO/target/test-seams/debug/sudo-prompt
 GENERIC=$REPO/target/debug/permission-prompt
 KEEP=${1:-}
 
-# Points inside the fixed `/bin/echo coord` request's dialog on a 1280x720 output: the Approve
-# button's centre, and the two ends of a drag across the command line. The dialog is centred at
-# its natural height, so *anything* that changes which fields that request renders moves these —
-# they dropped 27px when the env field stopped being drawn for a request that sets no variables.
-# A positive click test runs first, so a stale coordinate fails loudly instead of silently passing.
-APPROVE_X=791
-APPROVE_Y=399
-COMMAND_X1=436
-COMMAND_Y1=318
-COMMAND_X2=620
-COMMAND_Y2=318
-
 pass=0; fail=0
 ok()   { echo "PASS  $1"; pass=$((pass+1)); }
 bad()  { echo "FAIL  $1: $2"; fail=$((fail+1)); }
@@ -61,10 +49,8 @@ trap cleanup EXIT
 # Extra caller-side environment for one launch, to prove a variable is or is not forwarded.
 LAUNCH_ENV=""
 
-# Launch the gate inside the session and return once its prompt has settled.
-#
-# From `/`, always: the prompt shows the caller's cwd, so launching from the checkout would make the
-# dialog's width — and every coordinate above — depend on where the repo happens to live.
+# Launch the gate inside the session. From `/`, always: the prompt shows the caller's cwd, so a
+# fixed cwd keeps the dialog identical however the repo happens to be checked out.
 launch() {
     rm -f "$DIR/gate.log" "$DIR/gate.status"
     local args="" a
@@ -74,16 +60,22 @@ launch() {
         sh -c 'cd /; $GATE --$args >$DIR/gate.log 2>&1; echo \$? >$DIR/gate.status'" >/dev/null
 }
 
-# Wait for the prompt to be answerable, or for the run to have finished.
-settled() {
+# Wait until the gate has logged at least $2 (default 1) lines matching $1, or the run has
+# finished. Every wait in this file keys on a gate.log marker rather than a tuned sleep: a fixed
+# sleep is a race against the compositor, and losing that race was the old flakiness.
+wait_log() {
     local i
-    for i in $(seq 1 40); do
+    for i in $(seq 1 60); do
         [[ -f $DIR/gate.status ]] && return 0
-        grep -q "surface presented" "$DIR/gate.log" 2>/dev/null && { sleep 1.2; return 0; }
+        [[ $(grep -c "$1" "$DIR/gate.log" 2>/dev/null) -ge ${2:-1} ]] && return 0
         sleep 0.25
     done
     return 1
 }
+
+# Wait for the surface to be up (geometry logged), then for the controls to be answerable.
+presented() { wait_log "geometry: approve"; }
+settled()   { wait_log "controls live"; }
 
 finished() {
     local i
@@ -96,6 +88,23 @@ finished() {
 
 status() { cat "$DIR/gate.status" 2>/dev/null; }
 gatelog() { cat "$DIR/gate.log" 2>/dev/null; }
+
+# The gate logs where its widgets landed ("geometry: approve X Y W H", window-relative, and the
+# lock surface fills the output at 0,0) so the tests never hardcode layout. `center <name>` and
+# `left_edge <name>` turn the last such line into wdotool coordinates.
+geom() { gatelog | grep -oE "geometry: $1 [0-9]+ [0-9]+ [0-9]+ [0-9]+" | tail -1 | cut -d' ' -f3-6; }
+center() {
+    local x y w h
+    read -r x y w h <<<"$(geom "$1")" || return 1
+    [[ -n ${h:-} ]] || { echo "no geometry for $1 in gate.log" >&2; return 1; }
+    echo "$((x + w / 2)) $((y + h / 2))"
+}
+left_edge() {
+    local x y w h
+    read -r x y w h <<<"$(geom "$1")" || return 1
+    [[ -n ${h:-} ]] || { echo "no geometry for $1 in gate.log" >&2; return 1; }
+    echo "$((x + 2)) $((y + h / 2))"
+}
 
 # --- the gate presents, and either verdict works -----------------------------
 launch /bin/echo denied-by-escape; settled
@@ -170,15 +179,17 @@ fi
 
 # --- pointer approval -------------------------------------------------------
 launch /bin/echo coord; settled
-wdotool mousemove $APPROVE_X $APPROVE_Y click 1
+# shellcheck disable=SC2046
+wdotool mousemove $(center approve) click 1
 if finished && [[ $(status) == 0 ]]; then
     ok "a click on Approve after settling approves"
 else
-    bad "click approves" "status=$(status) — is $APPROVE_X,$APPROVE_Y still the Approve button?"
+    bad "click approves" "status=$(status); approve at '$(geom approve)'"
 fi
 
-launch /bin/echo coord
-wdotool mousemove $APPROVE_X $APPROVE_Y mousedown 1
+launch /bin/echo coord; presented
+# shellcheck disable=SC2046
+wdotool mousemove $(center approve) mousedown 1
 settled
 wdotool mouseup 1; sleep 0.5
 if [[ -z $(status) ]]; then
@@ -186,13 +197,17 @@ if [[ -z $(status) ]]; then
 else
     bad "press across settling" "status=$(status)"
 fi
-wdotool mousemove $APPROVE_X $APPROVE_Y click 1; finished >/dev/null
+# shellcheck disable=SC2046
+wdotool mousemove $(center approve) click 1; finished >/dev/null
 
 # --- selecting and copying --------------------------------------------------
 if command -v wl-paste >/dev/null; then
     launch /bin/echo coord; settled
-    wdotool mousemove $COMMAND_X1 $COMMAND_Y1 mousedown 1 \
-        mousemove $COMMAND_X2 $COMMAND_Y2 mouseup 1
+    # From just inside the command's left edge to past its right edge: the whole line.
+    read -r cx cy <<<"$(left_edge prominent)"
+    read -r _ _ cw _ <<<"$(geom prominent)"
+    wdotool mousemove "$cx" "$cy" mousedown 1 \
+        mousemove "$((cx + cw + 40))" "$cy" mouseup 1
     wdotool key ctrl+c
     sleep 0.5
     # One label per field and one line per command, so a drag takes all of it, quoted as a shell
@@ -223,9 +238,12 @@ fi
 wdotool key Escape; finished >/dev/null
 
 # A second lock client cannot be covered: the gate must fail fast rather than park on the lock.
-swaymsg exec "$GENERIC --surface session-lock --title 'other lock client' --body holding \
-    >$DIR/other.log 2>&1" >/dev/null
-sleep 2
+swaymsg exec "env RUST_LOG=debug $GENERIC --surface session-lock --title 'other lock client' \
+    --body holding >$DIR/other.log 2>&1" >/dev/null
+for _ in $(seq 1 40); do
+    grep -q "session locked" "$DIR/other.log" 2>/dev/null && break
+    sleep 0.25
+done
 out=$(env SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" SUDO_PROMPT_TEST_DISPLAY_ROOT="$DIR" \
     SUDO_PROMPT_TEST_LOCK_PATH="$DIR/lock" "$GATE" -- /bin/echo nope 2>&1)
 if [[ $? == 125 ]] && grep -q "session lock" <<<"$out"; then
@@ -233,7 +251,16 @@ if [[ $? == 125 ]] && grep -q "session lock" <<<"$out"; then
 else
     bad "held session lock" "$out"
 fi
-wdotool key Escape; sleep 1
+# Dismiss the other client once it will take the Escape, and wait for the lock to be free again.
+for _ in $(seq 1 40); do
+    grep -q "controls live" "$DIR/other.log" 2>/dev/null && break
+    sleep 0.25
+done
+wdotool key Escape
+for _ in $(seq 1 40); do
+    grep -q "session unlocked" "$DIR/other.log" 2>/dev/null && break
+    sleep 0.25
+done
 
 # --- signals ----------------------------------------------------------------
 launch /bin/echo should-not-run; settled
@@ -287,17 +314,20 @@ fi
 
 # --- hotplug ----------------------------------------------------------------
 launch /bin/echo hotplug; settled
-swaymsg create_output >/dev/null; sleep 2
-if [[ $(grep -c "lock surface for monitor" "$DIR/gate.log") == 2 ]]; then
+swaymsg create_output >/dev/null
+if wait_log "lock surface for monitor" 2; then
     ok "a hotplugged output gets its own lock surface"
 else
     bad "hotplug add" "$(grep -c 'lock surface' "$DIR/gate.log") surfaces"
 fi
-swaymsg output HEADLESS-2 unplug >/dev/null; sleep 2
+# Wait for the gate to see the new surface before unplugging it, or the unplug races the plug.
+wait_log "surface presented" 2
+swaymsg output HEADLESS-2 unplug >/dev/null
+wait_log "monitor removed"; sleep 0.5
 if [[ -z $(status) ]]; then
     ok "losing one output of two keeps the prompt"
 else
-    bad "hotplug remove" "status=$(status)"
+    bad "hotplug remove" "status=$(status); log: $(gatelog | tail -3)"
 fi
 swaymsg output HEADLESS-1 unplug >/dev/null
 if finished && [[ $(status) == 125 ]] && gatelog | grep -q "no outputs left"; then
