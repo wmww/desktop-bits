@@ -7,10 +7,13 @@
 use std::time::{Duration, Instant};
 
 /// Quiet period the prompt needs before it will accept an answer.
-pub const SETTLE: Duration = Duration::from_millis(1000);
+pub const SETTLE: Duration = Duration::from_millis(400);
 
-/// Multiple of [`SETTLE`] after which we give up and deny. Bounds a stuck or spammed key.
-pub const SETTLE_CAP_MULTIPLE: u32 = 5;
+/// Time from the last non-input restart after which we give up and deny. Bounds a stuck or spammed
+/// key. Absolute rather than a multiple of [`SETTLE`]: what makes 5s the right ceiling is how long a
+/// person will stare at a prompt that refuses to unlock, which has nothing to do with the length of
+/// the quiet period.
+pub const SETTLE_CAP: Duration = Duration::from_millis(5000);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettleState {
@@ -33,10 +36,10 @@ pub struct Settle {
 }
 
 impl Settle {
-    pub fn new(duration: Duration, cap_multiple: u32) -> Self {
+    pub fn new(duration: Duration, cap: Duration) -> Self {
         Settle {
             duration,
-            cap: duration * cap_multiple,
+            cap,
             quiet_start: None,
             attempt_start: None,
             settled: false,
@@ -89,6 +92,7 @@ mod tests {
     use super::*;
 
     const D: Duration = Duration::from_millis(1000);
+    const CAP: Duration = Duration::from_millis(5000);
 
     fn at(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
@@ -97,14 +101,14 @@ mod tests {
     #[test]
     fn waits_until_a_surface_is_presented() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         assert_eq!(s.poll(at(t0, 10_000)), SettleState::Waiting);
     }
 
     #[test]
     fn settles_after_a_quiet_period() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         assert_eq!(s.poll(at(t0, 999)), SettleState::Waiting);
         assert_eq!(s.poll(at(t0, 1000)), SettleState::Settled);
@@ -113,7 +117,7 @@ mod tests {
     #[test]
     fn input_restarts_the_quiet_period() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         s.input(at(t0, 900));
         assert_eq!(s.poll(at(t0, 1500)), SettleState::Waiting);
@@ -123,7 +127,7 @@ mod tests {
     #[test]
     fn continuous_input_hits_the_cap_and_denies() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         let mut ms = 0;
         loop {
@@ -144,7 +148,7 @@ mod tests {
     #[test]
     fn input_does_not_extend_the_cap() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         s.input(at(t0, 4900));
         assert_eq!(s.poll(at(t0, 5000)), SettleState::CapExceeded);
@@ -153,7 +157,7 @@ mod tests {
     #[test]
     fn a_non_input_restart_also_restarts_the_cap() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         // A late-waking output presents at 4.9s: the prompt gets a fresh chance to settle.
         s.restart(at(t0, 4900));
@@ -164,7 +168,7 @@ mod tests {
     #[test]
     fn a_restart_unsettles_a_live_prompt() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         assert_eq!(s.poll(at(t0, 1000)), SettleState::Settled);
         s.restart(at(t0, 2000));
@@ -175,7 +179,7 @@ mod tests {
     #[test]
     fn input_after_settling_is_not_a_disturbance() {
         let t0 = Instant::now();
-        let mut s = Settle::new(D, 5);
+        let mut s = Settle::new(D, CAP);
         s.restart(t0);
         assert_eq!(s.poll(at(t0, 1000)), SettleState::Settled);
         s.input(at(t0, 1100));

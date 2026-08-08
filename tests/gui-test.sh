@@ -135,7 +135,7 @@ fi
 launch /bin/echo should-not-run
 # Sustained input across the presentation restarts the quiet period until the cap denies.
 end=$((SECONDS + 9))
-while [[ $SECONDS -lt $end && -z $(status) ]]; do wdotool key a; sleep 0.25; done
+while [[ $SECONDS -lt $end && -z $(status) ]]; do wdotool key a; sleep 0.1; done
 if [[ $(status) == 125 ]] && gatelog | grep -q "never settled"; then
     ok "the settle cap denies rather than enabling the controls"
 else

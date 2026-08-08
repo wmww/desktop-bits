@@ -16,5 +16,5 @@ pub mod untrusted;
 
 pub use app::{init, install_panic_hook, run, unlock_and_sync, PromptConfig, SurfaceMode, Verdict};
 pub use dialog::{DialogSpec, Field, Style};
-pub use settle::{SETTLE, SETTLE_CAP_MULTIPLE};
+pub use settle::{SETTLE, SETTLE_CAP};
 pub use untrusted::{Escaped, Untrusted};

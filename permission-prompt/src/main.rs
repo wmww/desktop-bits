@@ -9,7 +9,7 @@
 use clap::Parser;
 use permission_prompt_ui::dialog::{DialogSpec, Field, Style};
 use permission_prompt_ui::{Escaped, PromptConfig, SurfaceMode, Untrusted, Verdict};
-use permission_prompt_ui::{SETTLE, SETTLE_CAP_MULTIPLE};
+use permission_prompt_ui::{SETTLE, SETTLE_CAP};
 
 /// Exit codes. This is not a sudo wrapper, so no exit-status collision exists.
 const EXIT_APPROVED: i32 = 0;
@@ -82,7 +82,7 @@ fn main() {
         spec: spec(&args),
         mode,
         settle: SETTLE,
-        cap_multiple: SETTLE_CAP_MULTIPLE,
+        cap: SETTLE_CAP,
         // Not a security boundary, and nothing to fail closed about: a lock that cannot be taken
         // falls through to the next mode.
         lock_required: false,

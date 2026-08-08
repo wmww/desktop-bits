@@ -49,7 +49,7 @@ pub struct PromptConfig {
     pub spec: DialogSpec,
     pub mode: SurfaceMode,
     pub settle: Duration,
-    pub cap_multiple: u32,
+    pub cap: Duration,
     /// True for the gate: a session lock that cannot be taken is a denial, never a downgrade to a
     /// weaker surface.
     pub lock_required: bool,
@@ -135,7 +135,7 @@ pub fn run(cfg: PromptConfig) -> Verdict {
     install_css();
     let cfg = Rc::new(cfg);
     let state: State = Rc::new(RefCell::new(Inner {
-        settle: Settle::new(cfg.settle, cfg.cap_multiple),
+        settle: Settle::new(cfg.settle, cfg.cap),
         shown_settled: None,
         windows: Vec::new(),
         held: HashSet::new(),

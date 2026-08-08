@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use permission_prompt_ui::{PromptConfig, SurfaceMode, Verdict, SETTLE, SETTLE_CAP_MULTIPLE};
+use permission_prompt_ui::{PromptConfig, SurfaceMode, Verdict, SETTLE, SETTLE_CAP};
 
 use crate::cmdenv::Provenance;
 use crate::envsetup::Captured;
@@ -88,7 +88,7 @@ pub fn run() -> Fail {
         spec: rendered.spec,
         mode: SurfaceMode::SessionLock,
         settle: SETTLE,
-        cap_multiple: SETTLE_CAP_MULTIPLE,
+        cap: SETTLE_CAP,
         lock_required: true,
     });
 

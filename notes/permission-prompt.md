@@ -279,7 +279,7 @@ unmissable truncation marker — scrolling does not help if GTK is laying out a 
 - One lock surface per output, all with the same dialog over an opaque backdrop. Nothing is dimmed:
   a lock surface replaces the desktop rather than sitting over it.
 - Settling is a **quiet period**, not a fixed window: the controls stay visibly disabled until
-  `SETTLE` (1s) has passed with no key press, key release or pointer button. It starts from the
+  `SETTLE` (400ms) has passed with no key press, key release or pointer button. It starts from the
   second frame-clock tick of a surface — the frame clock of a Wayland surface is driven by the
   compositor's frame callbacks after the first commit, so a second tick means the surface is really
   being presented, and a DPMS-blanked output never gets there. It restarts whenever any surface
@@ -287,7 +287,7 @@ unmissable truncation marker — scrolling does not help if GTK is laying out a 
 - Pointer *motion* is not input: a drifting mouse, a resting touchpad finger or a VM absolute pointer
   emits motion continuously, and with no prompt timeout a motion-sensitive quiet period would mean
   sudo never works. Scrolling is likewise left alone so the fields can be read while it settles.
-- The wait is **capped** at 5×`SETTLE` from the last non-input restart, and reaching the cap
+- The wait is **capped** at `SETTLE_CAP` (5s) from the last non-input restart, and reaching the cap
   **denies** with its own message rather than enabling the controls — enabling them would hand
   approval to whatever is generating the input. The cap restarts only on the non-input restarts, so
   a late-waking or refocused output survives while a stuck key stays bounded. This is a cap on
