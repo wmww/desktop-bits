@@ -23,3 +23,23 @@ rollout order, the manual verification items and the abandoned-lock recovery dri
 6. Check it with `sudo-prompt/verify.sh` as root (`--group NAME` if your sudo group isn't `wheel`,
    `--trusted NAME` for any uid that is meant to hold unrestricted root). It reads only, and exits
    non-zero if anything is wrong.
+
+### Theming
+
+The prompt takes its colours from root's GTK theme. It runs with a scrubbed environment — no caller
+gets to choose how a root prompt looks — so `GTK_THEME` is out and the theme has to be set somewhere
+root owns. As root:
+
+```sh
+gsettings set org.gnome.desktop.interface gtk-theme Adwaita-dark
+```
+
+Or, where there is no settings portal, `/root/.config/gtk-4.0/settings.ini`:
+
+```ini
+[Settings]
+gtk-theme-name=Adwaita
+gtk-application-prefer-dark-theme=1
+```
+
+With neither set it is GTK's built-in light theme. `RUST_LOG=debug` logs which one it resolved.

@@ -135,20 +135,15 @@ pub struct Dialog {
     /// log lines (see `app::log_geometry`) can name it; the GUI tests derive drag targets from
     /// those lines instead of hardcoding layout.
     pub prominent: Option<gtk::Label>,
-    /// Says why the controls are dead. Faded out rather than hidden once they are not: a widget
-    /// that stops taking space would move the buttons at the instant they become live, and
-    /// whatever the pointer was over could become the other button.
-    settling: gtk::Label,
 }
 
-const SETTLING: &str = "controls unlock in a moment";
-
 impl Dialog {
-    /// Visibly disable the controls while the prompt is settling.
+    /// Visibly disable the controls while the prompt is settling. Nothing else changes: a line of
+    /// text that appeared and went away would move the buttons at the instant they become live,
+    /// and whatever the pointer was over could become the other button.
     pub fn set_settled(&self, settled: bool) {
         self.approve.set_sensitive(settled);
         self.deny.set_sensitive(settled);
-        self.settling.set_opacity(if settled { 0.0 } else { 1.0 });
     }
 }
 
@@ -181,17 +176,12 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     }
     dialog.append(&fields);
 
-    // The settling message shares the buttons' row: on a cramped output every line of fixed
-    // chrome is a line the buttons might not get.
-    let settling = text::status(&Escaped::literal(SETTLING), &["pp-settling"]);
-    settling.set_valign(gtk::Align::Center);
     let deny = text::button(spec.deny, &["pp-deny"]);
     let approve = text::button(spec.approve, &["pp-approve"]);
 
     let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     bottom.add_css_class("pp-buttons");
-    bottom.append(&settling);
-    // Holds the buttons against the right edge whether or not the settling message is there.
+    // Holds the buttons against the right edge.
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     bottom.append(&spacer);
@@ -199,7 +189,7 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     bottom.append(&approve);
     dialog.append(&bottom);
 
-    let d = Dialog { root: dialog.upcast(), approve, deny, prominent, settling };
+    let d = Dialog { root: dialog.upcast(), approve, deny, prominent };
     d.set_settled(false);
     d
 }
@@ -416,16 +406,25 @@ fn wire_overflow_marker(scroller: &gtk::ScrolledWindow, marker: &gtk::Label, bod
 }
 
 /// Everything colour here comes from the theme's named colours, so the prompt looks like the rest
-/// of the desktop rather than like one particular palette. Only the two derived shades below are
-/// ours, and both are mixes of theme colours. The names used are the ones every GTK theme defines.
+/// of the desktop rather than like one particular palette.
 ///
-/// The gate is red and the generic presenter blue: the two must never be mistakable for each
-/// other, and that distinction is the one thing the theme does not get to decide.
+/// Only the legacy names are used — the ones a GTK3-era theme defines too, since those are what
+/// people actually have installed. Not `@accent_color`, `@accent_bg_color` or the rest of the
+/// libadwaita set: GTK's own theme defines them, most others do not, and a declaration naming an
+/// undefined colour is dropped in silence. That is not a colour falling back to something duller,
+/// it is the approve button losing its fill entirely, which is how this was found.
+///
+/// The gate is the error colour and the generic presenter the selection colour — two roles no
+/// theme paints the same, because the gate and the presenter must not be mistakable for each
+/// other. Which two colours those are is still the theme's to choose.
 pub const CSS: &str = "
 /* The recessed background of a caller-controlled viewport, and the same shade under the overflow
    marker that floats over it. A mix rather than a fixed colour, so it stays a slight step away
    from the dialog in a light theme and a dark one alike. */
 @define-color pp_inset mix(@theme_base_color, @theme_fg_color, 0.06);
+/* The generic presenter's accent. Aliased rather than used directly so the two dialogs' identity
+   colours are named in one place. */
+@define-color pp_accent @theme_selected_bg_color;
 window.pp-window { background-color: @theme_bg_color; }
 .pp-backdrop { background-color: @theme_bg_color; }
 .pp-dialog {
@@ -436,10 +435,10 @@ window.pp-window { background-color: @theme_bg_color; }
   color: @theme_text_color;
 }
 .pp-dialog.pp-gate { border-color: @error_color; }
-.pp-dialog.pp-generic { border-color: @accent_color; }
+.pp-dialog.pp-generic { border-color: @pp_accent; }
 .pp-heading { font-size: 1.35em; font-weight: bold; }
 .pp-dialog.pp-gate .pp-heading { color: @error_color; }
-.pp-dialog.pp-generic .pp-heading { color: @accent_color; }
+.pp-dialog.pp-generic .pp-heading { color: @pp_accent; }
 .pp-subtitle { font-size: 0.95em; color: @insensitive_fg_color; }
 .pp-field-label { font-size: 0.9em; color: @insensitive_fg_color; }
 .pp-trusted-value { font-size: 1.0em; }
@@ -448,7 +447,7 @@ window.pp-window { background-color: @theme_bg_color; }
 /* The one field the reader is being asked about. */
 .pp-prominent { font-size: 1.3em; font-weight: bold; }
 .pp-dialog.pp-gate .pp-prominent { color: @error_color; }
-.pp-dialog.pp-generic .pp-prominent { color: @accent_color; }
+.pp-dialog.pp-generic .pp-prominent { color: @pp_accent; }
 /* Caller data outside a viewport: quieter than the boxed fields, never louder. */
 .pp-flat { font-family: monospace; font-size: 1.05em; color: @insensitive_fg_color; }
 .pp-viewport {
@@ -472,7 +471,6 @@ window.pp-window { background-color: @theme_bg_color; }
   margin: 2px 14px;
 }
 .pp-warn { color: @warning_color; }
-.pp-settling { font-size: 0.9em; color: @insensitive_fg_color; }
 .pp-deny, .pp-approve { padding: 8px 20px; }
 /* No border and no theme highlight on the accented button: the theme draws a button outline in its
    own button colour, which around a filled accent reads as a stray hairline. */
@@ -480,9 +478,60 @@ window.pp-window { background-color: @theme_bg_color; }
   background-image: none;
   border: none;
   box-shadow: none;
-  background-color: @accent_color;
+  background-color: @pp_accent;
   color: @theme_selected_fg_color;
 }
 .pp-dialog.pp-gate .pp-approve { background-color: @error_color; }
 .pp-approve:disabled, .pp-deny:disabled { opacity: 0.45; }
 ";
+
+/// Theme colours [`CSS`] is allowed to name: the GTK3-era public set, which a theme written for
+/// either major version defines. Anything outside it has to be added here deliberately, after
+/// checking that themes people actually run define it — see [`CSS`] for what happens when one does
+/// not.
+#[cfg(test)]
+const LEGACY_COLORS: &[&str] = &[
+    "borders",
+    "error_color",
+    "insensitive_base_color",
+    "insensitive_bg_color",
+    "insensitive_fg_color",
+    "success_color",
+    "theme_base_color",
+    "theme_bg_color",
+    "theme_fg_color",
+    "theme_selected_bg_color",
+    "theme_selected_fg_color",
+    "theme_text_color",
+    "warning_color",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `@colour` the stylesheet names is either one we define or one from the legacy set.
+    /// GTK drops a declaration naming an undefined colour without a word, so a typo or a
+    /// libadwaita-only name is a widget that silently loses its fill rather than an error.
+    #[test]
+    fn css_names_no_colour_a_theme_might_not_define() {
+        let ours: Vec<&str> = CSS
+            .match_indices("@define-color ")
+            .map(|(i, m)| {
+                CSS[i + m.len()..].split_whitespace().next().expect("a name follows @define-color")
+            })
+            .collect();
+        for (i, _) in CSS.match_indices('@') {
+            let rest = &CSS[i + 1..];
+            let name: String =
+                rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if name == "define" || name.is_empty() {
+                continue;
+            }
+            assert!(
+                ours.contains(&name.as_str()) || LEGACY_COLORS.contains(&name.as_str()),
+                "@{name} is not defined here and is not in the legacy set every theme defines"
+            );
+        }
+    }
+}

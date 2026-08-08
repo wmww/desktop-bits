@@ -52,6 +52,34 @@ environment reaches a root GTK process unscrubbed under `-E`.
 
 Installed by `desktop-setup.sh` (`root_login_setup` → `override_sudo`, `install_wlbouncer`).
 
+## GTK theming for root (checked 2026-08-07)
+
+Root's dark look comes from `export GTK_THEME=Sweet` in `bashrc-shared.sh`, so every root GUI
+started from a shell is Sweet and anything started with a clean environment is not. `sudo-prompt` is
+the second kind on purpose — it scrubs the environment before GTK init, so a caller cannot pick the
+theme a root prompt is drawn in — and came up in GTK's built-in light theme on a dark desktop.
+
+**The knob that works (author, confirmed on the host):**
+
+    gsettings set org.gnome.desktop.interface gtk-theme $THEME   # as root
+
+Presumably via the settings portal rather than GSettings directly: `/run/user/0/bus` exists,
+`xdg-desktop-portal-gtk` is running, and `scrub()` sets `XDG_RUNTIME_DIR=/run/user/0`, which is
+where GDBus looks for a session bus when `DBUS_SESSION_BUS_ADDRESS` is unset. So the theme reaches
+the gate over root's own bus — root-controlled, which is all the gate requires. Not verified
+directly: in a headless sway with no bus, GTK ignored the same key served from a keyfile backend.
+
+A root-owned config file is the fallback where there is no portal, and works with the environment
+scrubbed (verified with a fake `HOME` under headless sway — both keys):
+
+    # /root/.config/gtk-4.0/settings.ini
+    [Settings]
+    gtk-theme-name=Sweet
+    gtk-application-prefer-dark-theme=1
+
+Sweet defines no `@accent_color`, which is why the prompt's stylesheet sticks to legacy colour
+names.
+
 ## Distro
 
 Arch, stock `sudo` (1.9.17 as of 2026-07). Possible future switch to sudo-rs, which has no plugin

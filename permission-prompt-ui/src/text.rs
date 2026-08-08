@@ -69,15 +69,6 @@ pub fn wrapped(text: &Escaped, classes: &[&str]) -> gtk::Label {
     l
 }
 
-/// A one-line label that ellipsizes rather than wrapping, so showing and hiding it never changes
-/// the height of the row it sits in.
-pub fn status(text: &Escaped, classes: &[&str]) -> gtk::Label {
-    let l = plain(text, classes);
-    l.set_wrap(false);
-    l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    l
-}
-
 /// A monospace label for a shell command or `NAME=value` lines.
 ///
 /// Wraps rather than running off to the right: a field that scrolls sideways can hide its tail,

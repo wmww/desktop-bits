@@ -2,7 +2,7 @@
 
 - `host-sudo-setup.md` — the user's desktop config repo, UID sandboxing scheme, wlbouncer policy,
   and the bash sudo-authorization chain that `sudo-prompt` replaces. Also the sudo/glibc facts the
-  design depends on.
+  design depends on, and how root's GTK theme is (not) configured.
 - `permission-prompt.md` — design record for the `permission-prompt`/`sudo-prompt` workspace: threat
   model, why the binaries are split, the shim's classification, the gate's two environments,
   rendering safety, the input state machine, and the session-lock discipline.

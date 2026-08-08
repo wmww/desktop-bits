@@ -305,10 +305,9 @@ or every prompt would come up showing a selection nobody made. Ctrl+C and Ctrl+I
 keys the input state machine lets through to the focused widget; nothing else there is focusable, so
 they can copy text and cannot reach anything activatable.
 
-The one status line that stays is "controls unlock in a moment", which answers the question a
-greyed-out button raises. It is faded to opacity 0 rather than hidden once settled: a widget that
-stops taking space would move the buttons at the instant they go live, and the pointer could end up
-over the *other* one.
+The quiet period shows as greyed-out buttons and nothing else — no status line, and nothing that
+appears or disappears: a widget that stopped taking space would move the buttons at the instant they
+go live, and the pointer could end up over the *other* one.
 
 ### Layout under pressure
 
@@ -347,10 +346,24 @@ GTK details, each of which cost an afternoon:
 - Every colour is a theme named colour (`@theme_base_color`, `@borders`, `@insensitive_fg_color`,
   `@warning_color`, plus one `mix()`-derived inset shade for the viewports), so the prompt follows
   root's GTK theme in light and dark alike. The caller cannot influence which theme that is —
-  `GTK_THEME` is never forwarded — and the gate-vs-generic accent stays fixed in code
-  (`@error_color` against `@accent_color`), because those two must never be confusable whatever the
-  theme does. The approve button clears `border` and `box-shadow`: the theme draws a button outline
-  in its own button colour, which around a filled accent is a stray hairline.
+  `GTK_THEME` is never forwarded. The gate is `@error_color` and the generic presenter
+  `@theme_selected_bg_color`, never the same colour, because those two must not be confusable
+  whatever the theme does. The approve button clears `border` and `box-shadow`: the theme draws a
+  button outline in its own button colour, which around a filled accent is a stray hairline.
+- **Only legacy colour names.** `@accent_color` and the rest of the libadwaita set exist in GTK's
+  own theme and in few others; under Sweet (a GTK3-era theme, and the one on this host) the approve
+  button came out with no fill at all, because GTK drops a declaration naming an undefined colour
+  in silence. A unit test now holds every `@name` in the stylesheet to the GTK3-era public set or
+  to one the stylesheet defines itself.
+- **Which theme the gate gets** is root's GTK configuration and nothing else. The environment is
+  scrubbed before GTK init, so `GTK_THEME` — how root's own desktop selects Sweet, from
+  `bashrc-shared.sh` — does not reach it, and the gate came up in GTK's built-in light theme on a
+  dark desktop. What does reach it is `gsettings set org.gnome.desktop.interface gtk-theme` run as
+  root (the host's answer, via the settings portal on root's session bus, which `scrub()` leaves
+  reachable through `XDG_RUNTIME_DIR=/run/user/0`), and failing that
+  `/root/.config/gtk-4.0/settings.ini`, since `scrub()` sets `HOME=/root`. Both are root-owned,
+  which is the whole requirement. `init()` logs the theme it resolved at debug level; see
+  `host-sudo-setup.md`.
 - A `GtkGrid` hands its spare width to *every* column a spanning child covers, so the full-width
   command field made the gutter column expand and stranded the `env` label a third of a dialog away
   from its own box. The fields are plain rows now, with a fixed-width gutter.

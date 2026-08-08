@@ -99,6 +99,14 @@ pub fn init() -> Result<(), String> {
         // window has keyboard focus. The prompt would then come up showing a selection the reader
         // never made.
         settings.set_gtk_label_select_on_focus(false);
+        // Which theme GTK settled on, so "why is the prompt not following my theme?" is one debug
+        // line rather than a guess. The gate runs with a scrubbed environment, so its answer comes
+        // from root's own GTK config and nothing the caller said.
+        log::debug!(
+            "gtk theme: {} (prefer-dark {})",
+            settings.gtk_theme_name().unwrap_or_default(),
+            settings.is_gtk_application_prefer_dark_theme(),
+        );
     }
     Ok(())
 }
