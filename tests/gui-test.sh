@@ -49,15 +49,20 @@ trap cleanup EXIT
 # Extra caller-side environment for one launch, to prove a variable is or is not forwarded.
 LAUNCH_ENV=""
 
+# Which run `launch` writes and every helper below watches. The concurrency test moves it aside to
+# run a second gate while the first is still up.
+watch() { GATE_LOG=$DIR/$1.log; GATE_STATUS=$DIR/$1.status; }
+watch gate
+
 # Launch the gate inside the session. From `/`, always: the prompt shows the caller's cwd, so a
 # fixed cwd keeps the dialog identical however the repo happens to be checked out.
 launch() {
-    rm -f "$DIR/gate.log" "$DIR/gate.status"
+    rm -f "$GATE_LOG" "$GATE_STATUS"
     local args="" a
     for a in "$@"; do args+=" $(printf '%q' "$a")"; done
     swaymsg exec "env $LAUNCH_ENV SUDO_UID=$(id -u) SUDO_GID=$(id -g) \
         SUDO_PROMPT_TEST_DISPLAY_ROOT=$DIR SUDO_PROMPT_TEST_LOCK_PATH=$DIR/lock RUST_LOG=debug \
-        sh -c 'cd /; $GATE --$args >$DIR/gate.log 2>&1; echo \$? >$DIR/gate.status'" >/dev/null
+        sh -c 'cd /; $GATE --$args >$GATE_LOG 2>&1; echo \$? >$GATE_STATUS'" >/dev/null
 }
 
 # Wait until the gate has logged at least $2 (default 1) lines matching $1, or the run has
@@ -66,8 +71,8 @@ launch() {
 wait_log() {
     local i
     for i in $(seq 1 60); do
-        [[ -f $DIR/gate.status ]] && return 0
-        [[ $(grep -c "$1" "$DIR/gate.log" 2>/dev/null) -ge ${2:-1} ]] && return 0
+        [[ -f $GATE_STATUS ]] && return 0
+        [[ $(grep -c "$1" "$GATE_LOG" 2>/dev/null) -ge ${2:-1} ]] && return 0
         sleep 0.25
     done
     return 1
@@ -80,14 +85,14 @@ settled()   { wait_log "controls live"; }
 finished() {
     local i
     for i in $(seq 1 40); do
-        [[ -f $DIR/gate.status ]] && return 0
+        [[ -f $GATE_STATUS ]] && return 0
         sleep 0.25
     done
     return 1
 }
 
-status() { cat "$DIR/gate.status" 2>/dev/null; }
-gatelog() { cat "$DIR/gate.log" 2>/dev/null; }
+status() { cat "$GATE_STATUS" 2>/dev/null; }
+gatelog() { cat "$GATE_LOG" 2>/dev/null; }
 
 # The gate logs where its widgets landed ("geometry: approve X Y W H", window-relative, and the
 # lock surface fills the output at 0,0) so the tests never hardcode layout. `center <name>` and
@@ -227,15 +232,27 @@ if command -v wl-paste >/dev/null; then
 fi
 
 # --- the locks --------------------------------------------------------------
+# A second request queues on the flock instead of failing, and takes its turn when the first ends.
 launch /bin/echo first; settled
-out=$(env SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" SUDO_PROMPT_TEST_DISPLAY_ROOT="$DIR" \
-    SUDO_PROMPT_TEST_LOCK_PATH="$DIR/lock" "$GATE" -- /bin/echo second 2>&1)
-if [[ $? == 125 ]] && grep -q "already holds" <<<"$out"; then
-    ok "a concurrent request fails closed on the flock"
+watch second; launch /bin/echo second
+if wait_log "another sudo-prompt is active"; then
+    ok "a concurrent request queues on the flock"
 else
-    bad "concurrent flock" "$out"
+    bad "concurrent flock" "$(gatelog)"
 fi
-wdotool key Escape; finished >/dev/null
+watch gate; wdotool key Escape; finished >/dev/null
+watch second
+if settled; then
+    wdotool key Escape
+    if finished && [[ $(status) == 125 ]] && gatelog | grep -q "User denied sudo :("; then
+        ok "the queued request presents once the first is answered"
+    else
+        bad "queued request verdict" "status=$(status)"
+    fi
+else
+    bad "queued request" "never presented: $(gatelog)"
+fi
+watch gate
 
 # A second lock client cannot be covered: the gate must fail fast rather than park on the lock.
 swaymsg exec "env RUST_LOG=debug $GENERIC --surface session-lock --title 'other lock client' \
@@ -272,7 +289,7 @@ else
 fi
 # The session must be left unlocked: the next lock has to succeed.
 launch /bin/echo unlocked-check
-if settled && grep -q "session locked" "$DIR/gate.log"; then
+if settled && grep -q "session locked" "$GATE_LOG"; then
     ok "every exit path leaves the session unlocked"
 else
     bad "unlock discipline" "the next lock did not succeed"
@@ -318,7 +335,7 @@ swaymsg create_output >/dev/null
 if wait_log "lock surface for monitor" 2; then
     ok "a hotplugged output gets its own lock surface"
 else
-    bad "hotplug add" "$(grep -c 'lock surface' "$DIR/gate.log") surfaces"
+    bad "hotplug add" "$(grep -c 'lock surface' "$GATE_LOG") surfaces"
 fi
 # Wait for the gate to see the new surface before unplugging it, or the unplug races the plug.
 wait_log "surface presented" 2

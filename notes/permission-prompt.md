@@ -48,7 +48,8 @@ is gone, recovery is: log in as root and edit sudoers.
 
 Accepted, out of scope: a compromised root; pkexec (`issues/pkexec-root-prompt.md`); denial of
 service (a stuck or spammed prompt blocks all sudo and, because it holds the session lock, hides the
-desktop until dismissed — recovery is a root TTY); a SIGKILLed gate leaving the session locked with
+desktop until dismissed — recovery is a root TTY; and since requests queue, a spam storm becomes a
+queue of prompts, each denial costing a settle period rather than ending it); a SIGKILLed gate leaving the session locked with
 no client; what the approved command then does, including a caller-writable `sudo ./script` changing
 between approval and exec.
 
@@ -436,11 +437,22 @@ Order: flock → display selection → `lock()` → windows. `failed` is a denia
   `sudo-prompt-operations.md`.
 
 The flock is separate and simpler: `/run/sudo-prompt.lock` opened `O_CREAT|O_NOFOLLOW|O_CLOEXEC`
-0600, fstat'd for root ownership, regular file and no group/other write, then a non-blocking
-exclusive `flock`. Safe to create without a tmpfiles.d entry because `/run` is root-owned and only
-root-writable. The lock lives on the open file description, so the kernel releases it on any exit
-including SIGKILL — the opposite of the session lock. SIGINT/SIGTERM/SIGHUP are never blocked and all
-count as denial (SIGHUP is the normal outcome of the requesting terminal going away).
+0600, fstat'd for root ownership, regular file and no group/other write, then an exclusive `flock`.
+Safe to create without a tmpfiles.d entry because `/run` is root-owned and only root-writable. The
+lock lives on the open file description, so the kernel releases it on any exit including SIGKILL —
+the opposite of the session lock. SIGINT/SIGTERM/SIGHUP are never blocked and all count as denial
+(SIGHUP is the normal outcome of the requesting terminal going away).
+
+A concurrent request **queues** rather than failing: `LOCK_EX|LOCK_NB` first, and on `EWOULDBLOCK`
+one `info` line ("another sudo-prompt is active; waiting for it") — below the default filter, so a
+queued sudo is silent unless `RUST_LOG=info` — then a blocking `flock`. Fail-fast was never a control — a caller can retry in a loop — and it punished the
+legitimate cases (two scripts racing, or the human running sudo while a prompt is up, which the
+minimize feature makes routine). No timeout: the wait is before the UI's signal handlers exist, so
+the waiter still has default disposition and Ctrl+C kills it at once. Everything after the flock —
+capture, scrub, display selection — is done fresh when the turn comes, so a request that queued for
+minutes is not stale. Wake order is unspecified, not FIFO; irrelevant at human scale. A caller
+SIGKILLed while queued leaves an orphaned gate that eventually prompts for a command nobody is
+waiting on; there is no clean detection, and the human denies it.
 
 ## Host requirements worth remembering
 

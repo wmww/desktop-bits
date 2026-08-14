@@ -1,5 +1,6 @@
-//! One prompt at a time. A concurrent request fails closed; prompts are never queued, there is no
-//! alternate lock path, and the gate does not continue without the lock.
+//! One prompt at a time. A concurrent request waits its turn: the kernel queues it on the flock and
+//! wakes it the moment the holder exits. There is no alternate lock path, and the gate does not
+//! continue without the lock.
 //!
 //! The lock lives on the open file description, so the kernel releases it on any exit including
 //! SIGKILL — no PID file or stale-lock recovery is needed. (Unlike the session lock, which is
@@ -23,9 +24,22 @@ impl Drop for LockFile {
     }
 }
 
-/// Creating the file is safe without an installer or a tmpfiles.d entry because /run itself is
-/// root-owned and only root-writable, so no other uid can win the race or plant a symlink.
+/// Take the lock, waiting for the current prompt if there is one. Never returns without it.
 pub fn acquire(path: &Path, expect_uid: u32) -> Result<LockFile, String> {
+    let lock = open_checked(path, expect_uid)?;
+    if !lock.try_flock()? {
+        // Below the default filter: a queued request is normal, not something to warn about.
+        log::info!("another sudo-prompt is active; waiting for it to finish");
+        lock.wait_flock()?;
+    }
+    log::debug!("holding {}", path.display());
+    Ok(lock)
+}
+
+/// Open the lock file and check it is the one we mean. Creating it is safe without an installer or
+/// a tmpfiles.d entry because /run itself is root-owned and only root-writable, so no other uid can
+/// win the race or plant a symlink.
+fn open_checked(path: &Path, expect_uid: u32) -> Result<LockFile, String> {
     let mut c_path = path.as_os_str().as_bytes().to_vec();
     c_path.push(0);
 
@@ -61,16 +75,38 @@ pub fn acquire(path: &Path, expect_uid: u32) -> Result<LockFile, String> {
         return Err(format!("lock file {} is group or other writable", path.display()));
     }
 
-    // SAFETY: fd is open.
-    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } < 0 {
-        return Err(format!(
-            "another sudo-prompt already holds {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        ));
+    Ok(lock)
+}
+
+impl LockFile {
+    /// Ok(false) means another gate holds it.
+    fn try_flock(&self) -> Result<bool, String> {
+        // SAFETY: fd is open.
+        if unsafe { libc::flock(self.fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => Ok(false),
+            _ => Err(format!("cannot lock the lock file: {err}")),
+        }
     }
 
-    Ok(lock)
+    /// Block until the lock is ours. No timeout: the prompt itself waits indefinitely too, and a
+    /// signal kills the waiter outright — its handlers are not installed yet — so the wait is
+    /// interruptible. The EINTR retry is defensive.
+    fn wait_flock(&self) -> Result<(), String> {
+        loop {
+            // SAFETY: fd is open.
+            if unsafe { libc::flock(self.fd, libc::LOCK_EX) } == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("cannot lock the lock file: {err}"));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -92,12 +128,32 @@ mod tests {
     }
 
     #[test]
-    fn a_concurrent_request_fails_closed() {
+    fn a_concurrent_request_cannot_take_the_lock() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lock");
         let _held = acquire(&path, uid()).unwrap();
-        let err = acquire(&path, uid()).unwrap_err();
-        assert!(err.contains("already holds"), "{err}");
+        let probe = open_checked(&path, uid()).unwrap();
+        assert!(!probe.try_flock().unwrap());
+    }
+
+    #[test]
+    fn a_concurrent_request_waits_and_then_gets_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let held = acquire(&path, uid()).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiting = path.clone();
+        let waiter = std::thread::spawn(move || {
+            let lock = acquire(&waiting, uid());
+            tx.send(()).unwrap();
+            lock
+        });
+        // Nothing is asserted about how long the wait takes, only that it ends once we let go.
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "acquired early");
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(30)).expect("waiter never acquired");
+        waiter.join().unwrap().expect("second acquire");
     }
 
     #[test]
