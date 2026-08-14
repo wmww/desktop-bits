@@ -498,10 +498,19 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
         move |_, keyval, keycode, modifiers| {
             let mut st = state.borrow_mut();
             let now = Instant::now();
+            let win = window.upgrade();
+            let typing = win.as_ref().is_some_and(|w| focus_is_in(w, response.as_ref()));
             // Insert before the settled check: a key held from before settling must still be
             // known, so its autorepeats are never mistaken for a fresh press afterwards.
             let repeat = !st.held.insert(keycode);
-            st.settle.input(now);
+            // Typing into the response box is not a disturbance. The box takes focus only from a
+            // deliberate click — which is itself input, and restarts the quiet period — and it
+            // cannot answer anything, so a sentence typed into it is aimed at this prompt by
+            // definition. Counting it would let someone writing a reason run into the settle cap
+            // and have the request denied out from under them.
+            if !typing || is_answer_key(keyval) {
+                st.settle.input(now);
+            }
             let answered = st.settle.is_settled() && !repeat;
             // Enter and Escape keep their meaning while the human is typing: they are handled
             // here, before the entry can see them, so a response is an annotation on the answer
@@ -526,22 +535,33 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
                 // and nothing else, since it cannot reach an activatable widget.
                 return glib::Propagation::Proceed;
             }
-            // Everything else reaches the response entry, and only the response entry. It can
-            // hold focus only once it is sensitive, which is only once the prompt has settled, so
-            // this cannot open a path to the keyboard before then.
-            match window.upgrade() {
-                Some(w) if focus_is_in(&w, response.as_ref()) => glib::Propagation::Proceed,
+            // Everything else reaches the response entry, and only the response entry — settled
+            // or not. The entry holds focus only after a click on it, buttons cannot take focus,
+            // and Enter and Escape never get this far, so no keystroke can reach anything
+            // activatable however the prompt is focused.
+            if typing {
+                glib::Propagation::Proceed
+            } else {
                 // Nothing else may turn a keystroke into an activation.
-                _ => glib::Propagation::Stop,
+                glib::Propagation::Stop
             }
         }
     });
     keys.connect_key_released({
         let state = state.clone();
-        move |_, _keyval, keycode, _| {
+        let window = window.downgrade();
+        let response = d.response.clone();
+        move |_, keyval, keycode, _| {
             let mut st = state.borrow_mut();
             st.held.remove(&keycode);
-            st.settle.input(Instant::now());
+            // Same exemption as the press, or the releases alone would keep the quiet period
+            // restarting while the human types. See `connect_key_pressed`.
+            let typing = window
+                .upgrade()
+                .is_some_and(|w| focus_is_in(&w, response.as_ref()));
+            if !typing || is_answer_key(keyval) {
+                st.settle.input(Instant::now());
+            }
         }
     });
     window.add_controller(keys);
@@ -551,15 +571,25 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
     // deliberately not an input event: with no prompt timeout, a motion-sensitive quiet period
     // would mean a drifting mouse can stop sudo from ever working. Scrolling is likewise left
     // alone so the caller-controlled fields can be read while the prompt settles.
+    //
+    // A press over a control that does not answer the prompt is let through instead: the quiet
+    // period guards the answer, not the whole surface. It still counts as input, so it restarts
+    // the quiet period like any other press.
     let click = gtk::GestureClick::new();
     click.set_button(0);
     click.set_propagation_phase(gtk::PropagationPhase::Capture);
     click.connect_pressed({
         let state = state.clone();
-        move |gesture, _, _, _| {
+        let window = window.downgrade();
+        let live = live_controls(d);
+        move |gesture, _, x, y| {
             let mut st = state.borrow_mut();
             st.settle.input(Instant::now());
-            if !st.settle.is_settled() {
+            if st.settle.is_settled() {
+                return;
+            }
+            let over_live = window.upgrade().is_some_and(|w| hits(&w, x, y, &live));
+            if !over_live {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
             }
         }
@@ -597,6 +627,37 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
             }
         }
     });
+}
+
+/// Enter and Escape: the keys that answer the prompt. They are handled by the key controller
+/// wherever the focus is, so they are a disturbance to the quiet period wherever the focus is.
+fn is_answer_key(keyval: gdk::Key) -> bool {
+    matches!(
+        keyval,
+        gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter | gdk::Key::Escape
+    )
+}
+
+/// The controls that stay usable through the quiet period: the response box and minimize. Neither
+/// answers the prompt — minimize hands the desktop back with the request still pending — so a
+/// press on either is let through while the prompt is settling.
+fn live_controls(d: &Dialog) -> Vec<gtk::Widget> {
+    let mut live = Vec::new();
+    if let Some(r) = &d.response {
+        live.push(r.clone());
+    }
+    if let Some(m) = &d.minimize {
+        live.push(m.clone().upcast());
+    }
+    live
+}
+
+/// Is the point (window coordinates) over one of `targets`, or over something inside one?
+fn hits(window: &gtk::Window, x: f64, y: f64, targets: &[gtk::Widget]) -> bool {
+    let Some(picked) = window.pick(x, y, gtk::PickFlags::DEFAULT) else {
+        return false;
+    };
+    targets.iter().any(|t| &picked == t || picked.is_ancestor(t))
 }
 
 /// Is the window's focus the response entry, or something inside it? A `GtkEntry` puts the focus

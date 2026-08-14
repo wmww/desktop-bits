@@ -347,17 +347,17 @@ if command -v wl-copy >/dev/null; then
     fi
 fi
 
-# The entry is insensitive until the controls are live, so it cannot take focus and typing at it
-# is swallowed like every other key — including for the settle cap, which this must not trip.
-launch /bin/echo late-typing; presented
+# The entry is live from the moment the prompt is presented — the quiet period guards the answer,
+# not the whole surface — and typing into it does not feed the settle cap, or a long sentence would
+# get the request denied out from under whoever was writing it.
+launch /bin/echo early-typing; presented
 click response
-wdotool type "ghost"
+wdotool type "written while settling"
 if settled && [[ -z $(status) ]]; then
-    click response
-    wdotool type "real"
     wdotool key Return
-    if finished && [[ $(status) == 0 ]] && gatelog | grep -q "^User response: real$"; then
-        ok "the entry takes nothing before the controls are live"
+    if finished && [[ $(status) == 0 ]] \
+       && gatelog | grep -q "^User response: written while settling$"; then
+        ok "the entry takes text before the controls are live"
     else
         bad "pre-settle typing" "status=$(status); $(gatelog | grep 'User response')"
     fi
@@ -608,16 +608,19 @@ wait_other "$DIR/rival.log" "controls live"
 wdotool key Escape
 wait_other "$DIR/rival.log" "session unlocked"
 
-# Minimize is dead while the prompt settles, exactly like the other two controls.
+# Minimize works while the prompt settles: it hands the desktop back with the request still
+# pending, so it is not an answer and the quiet period has nothing to protect there. No "controls
+# live" line means the click really did land before the prompt settled.
 launch /bin/echo settle-check; presented
 # shellcheck disable=SC2046
 wdotool mousemove $(center minimize) click 1
-if settled && [[ -z $(status) ]] && ! gatelog | grep -q "minimized"; then
-    ok "minimize does nothing during the quiet period"
+if chipped && [[ -z $(status) ]] && ! gatelog | grep -q "controls live"; then
+    ok "minimize works during the quiet period"
 else
     bad "minimize while settling" "status=$(status)"
 fi
-wdotool key Escape; finished >/dev/null
+# shellcheck disable=SC2046
+wdotool mousemove $(center chip-cancel) click 1; finished >/dev/null
 
 # --- hotplug ----------------------------------------------------------------
 launch /bin/echo hotplug; settled

@@ -1,10 +1,12 @@
 # The first click after the controls go live is lost if the pointer never moved
 
-Pre-existing, found while adding the response entry. Affects both buttons and the entry.
+Pre-existing, found while adding the response entry. Affects the two answer buttons — and only
+those: the response box and minimize are no longer disabled while the prompt settles, so their
+sensitivity never changes under a resting pointer.
 
 **Symptom.** If the pointer is resting where a control will be *before* that control becomes
-sensitive — the settle period disables all of them — then the first click after `controls live` does
-nothing. A second click, or any pointer motion in between, works. So a human whose mouse happens to
+sensitive — the settle period disables approve and deny — then the first click after `controls live`
+does nothing. A second click, or any pointer motion in between, works. So a human whose mouse happens to
 sit over "Run as root" when the prompt appears has to click it twice.
 
 **Cause.** Not our claimed-press gesture: hovering with no click at all reproduces it, and a
@@ -25,10 +27,12 @@ wdotool mousemove $(center approve) click 1   # same coordinates: no motion even
 
 **Candidate fixes**, none tried:
 
-- Stop using sensitivity for the settling look. Keep the controls sensitive and grey them with a
-  CSS class instead; safety would then rest entirely on the capture-phase gesture that already
-  swallows every press until settled, and on the key controller that swallows every key. Weakens
-  the "an insensitive entry cannot take focus" argument in `notes/permission-prompt.md`.
+- Stop using sensitivity for the settling look. Keep approve and deny sensitive and grey them with
+  a CSS class instead; safety would then rest entirely on the capture-phase gesture that already
+  swallows every press until settled, and on the key controller that swallows every key. Both of
+  those already carry the guarantee on their own, so this no longer trades anything away — the
+  "an insensitive entry cannot take focus" argument it used to weaken is gone (the entry is live
+  throughout, and typing simply does not feed the quiet period).
 - Find a public GTK4 call that re-picks the pointer target, and make `Dialog::set_settled` do it.
   Nothing obvious exists; `gtk_widget_set_sensitive` is not enough and hiding/showing a control
   would move the buttons at the moment they go live, which the layout deliberately avoids.

@@ -311,7 +311,8 @@ used to: approve keeps its words, because it is the one control that has to stat
 while deny and minimize are cairo-drawn icons evoking a window's own decoration buttons. Drawn
 rather than glyphs, because no font glyph for "minimize" can be relied on and because drawing both
 keeps their stroke weight and colour identical — the colour is `widget.color()` read at draw time,
-so the theme and the `:disabled` fade reach them exactly as they reach a label. Each carries an
+so the theme and the `:disabled` fade (which only deny ever takes) reach them exactly as they reach
+a label. Each carries an
 accessible label, which its constructor requires.
 
 `cwd` is abbreviated with `~` against the *requesting* user's passwd home directory, never root's;
@@ -350,9 +351,10 @@ stays in the buffer and renders as a control glyph on the one visible line. Noth
 that, and the printed line stays one line because `Escaped::of` turns it into `\x0a` — that
 guarantee is ours, not the toolkit's.
 
-The quiet period shows as greyed-out controls — the buttons and the entry — and nothing else: no
-status line, and nothing that appears or disappears, since a widget that stopped taking space would
-move the buttons at the instant they go live, and the pointer could end up over the *other* one.
+The quiet period shows as two greyed-out answer buttons and nothing else: no status line, and
+nothing that appears or disappears, since a widget that stopped taking space would move the buttons
+at the instant they go live, and the pointer could end up over the *other* one. The response box
+and minimize are never disabled — see the input state machine for why.
 
 ### Layout under pressure
 
@@ -450,7 +452,7 @@ many arguments it has, and dropping it would leave the field empty.
 
 - One lock surface per output, all with the same dialog over an opaque backdrop. Nothing is dimmed:
   a lock surface replaces the desktop rather than sitting over it.
-- Settling is a **quiet period**, not a fixed window: the controls stay visibly disabled until
+- Settling is a **quiet period**, not a fixed window: the answer buttons stay visibly disabled until
   `SETTLE` (400ms) has passed with no key press, key release or pointer button. It starts from the
   second frame-clock tick of a surface — the frame clock of a Wayland surface is driven by the
   compositor's frame callbacks after the first commit, so a second tick means the surface is really
@@ -469,19 +471,31 @@ many arguments it has, and dropping it would leave the field empty.
 - Approval needs a fresh physical key *down* on `Return`/`KP_Enter`/`ISO_Enter`, or a pointer press
   delivered after settling. Escape denies. Held keycodes are tracked so a client-side autorepeat is
   never a fresh press, and the set is cleared on focus loss.
+- **Only the two answers are gated.** The quiet period exists to stop input the human did not aim
+  at this prompt from *answering* it, so `Dialog::set_settled` disables approve and deny and
+  nothing else. The response box and minimize stay live from the first frame: neither decides
+  anything (minimize hands the desktop back with the request still pending), and both are what
+  someone who is not ready to answer reaches for first. A press that lands on one of them is let
+  through by the capture gesture instead of being claimed — it still counts as input and still
+  restarts the quiet period.
 - The key controller runs in the capture phase, before any widget, and its rule is: track the key
-  and feed the settle machinery always; handle Enter and Escape itself and **stop** them, settled or
-  not, so they keep their meaning while the human is typing and the entry never sees an `activate`;
-  let Ctrl+C/Ctrl+Insert through to copy from the focused label; let anything else through only when
-  the window's focus is inside the response entry, and stop it otherwise. Buttons set `can-focus`
-  off, so focus can only ever be on a label or in the entry, and no key can reach anything
-  activatable. There is no default action.
-- Typing therefore cannot reach the settle cap: the entry is insensitive until settled, an
-  insensitive widget cannot take focus, and `Settle::input` is a no-op once settled. Nothing is
-  focused on map or on refocus (`drop_focus`), so the human clicks the entry to type; a refocused
-  window un-settles and briefly disables it, and the buffer keeps the text. Tab out of the entry
-  moves focus to a label and typing goes back to being swallowed, which is harmless — Enter and
-  Escape are global either way.
+  always; handle Enter and Escape itself and **stop** them, settled or not, so they keep their
+  meaning while the human is typing and the entry never sees an `activate`; let Ctrl+C/Ctrl+Insert
+  through to copy from the focused label; let anything else through only when the window's focus is
+  inside the response entry, and stop it otherwise. Buttons set `can-focus` off, so focus can only
+  ever be on a label or in the entry, and no key can reach anything activatable. There is no
+  default action.
+- Typing therefore cannot reach the settle cap, but the reason is no longer that the entry is
+  disabled: a key press or release **delivered to the focused entry does not feed `Settle::input`
+  at all** (Enter and Escape excepted, since the controller takes those wherever focus is). Without
+  that, a sentence typed into the box would restart the quiet period keystroke by keystroke and
+  reach the 5s cap, denying the request out from under whoever was writing it. This costs nothing:
+  the entry takes focus only from a deliberate click, that click is itself input, and the entry
+  cannot answer — so approval is still 400ms of quiet after the last event aimed anywhere else.
+- Nothing is focused on map or on refocus (`drop_focus`), so the human clicks the entry to type; a
+  refocused window un-settles but the box keeps working and the buffer keeps the text. Tab out of
+  the entry moves focus to a label and typing goes back to being swallowed, which is harmless —
+  Enter and Escape are global either way.
 
 ### The minimize chip
 
@@ -495,6 +509,9 @@ What makes that safe is that the chip is **powerless**: its only two actions are
 - The prompt always *starts* full and locked. Only a human click on the lock surface minimizes it,
   and the gate has no options, so a caller cannot ask for a prompt that starts minimized. Keep it
   that way.
+- Minimize is clickable during the quiet period (see the input state machine). A stray or baited
+  click there costs the human a chip in the corner and a click to expand, and the expand starts a
+  fresh quiet period — it can never approve, and it does not deny either.
 - The chip is on the overlay layer, which non-root uids can also draw on
   (`issues/overlay-layer-spoofing.md`), so it is coverable and spoofable. Accepted by design:
   covering it hides a pending prompt, which is the accepted DoS class; a fake's text is corrected

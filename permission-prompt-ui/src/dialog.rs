@@ -152,28 +152,23 @@ pub struct Dialog {
     /// those lines instead of hardcoding layout.
     pub prominent: Option<gtk::Label>,
     /// The response box, when the spec asked for one. Held as a plain widget: reading it goes
-    /// through the shared buffer, so all this reference does is enable, disable and locate it.
+    /// through the shared buffer, so all this reference does is locate it — for the focus test,
+    /// for hit-testing a press, and for the geometry log.
     pub response: Option<gtk::Widget>,
 }
 
 impl Dialog {
-    /// Visibly disable the controls while the prompt is settling. Nothing else changes: a line of
-    /// text that appeared and went away would move the buttons at the instant they become live,
+    /// Visibly disable the two answers while the prompt is settling. Nothing else changes: a line
+    /// of text that appeared and went away would move the buttons at the instant they become live,
     /// and whatever the pointer was over could become the other button.
+    ///
+    /// The quiet period exists to stop a keystroke or click the human did not aim at this prompt
+    /// from *answering* it, so it covers exactly the controls that answer. The response box and
+    /// minimize stay live throughout: neither decides anything, and both are what a human who is
+    /// not ready to answer reaches for first.
     pub fn set_settled(&self, settled: bool) {
         self.approve.set_sensitive(settled);
         self.deny.set_sensitive(settled);
-        // An insensitive entry cannot take focus, so nothing can be typed before the prompt is
-        // live — which is what keeps typing from ever reaching the settle cap.
-        if let Some(r) = &self.response {
-            r.set_sensitive(settled);
-        }
-        // Minimize is disabled with the others rather than treated as a harmless de-escalation:
-        // one rule for the whole row is what makes "the controls are dead while it settles"
-        // something the reader can see, and it keeps the input state machine untouched.
-        if let Some(m) = &self.minimize {
-            m.set_sensitive(settled);
-        }
     }
 }
 
