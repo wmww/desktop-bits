@@ -470,7 +470,7 @@ launch_generic() {
     rm -f "$GATE_LOG" "$GATE_STATUS"
     local args="" a
     for a in "$@"; do args+=" $(printf '%q' "$a")"; done
-    swaymsg exec "sh -c '$GENERIC --surface layer --verbose$args >$GATE_LOG 2>&1; \
+    swaymsg exec "env $LAUNCH_ENV sh -c '$GENERIC --surface layer --verbose$args >$GATE_LOG 2>&1; \
         echo \$? >$GATE_STATUS'" >/dev/null
 }
 
@@ -506,6 +506,25 @@ then
 else
     bad "generic deny" "status=$(status); $(gatelog | tail -1)"
 fi
+
+# --- a user stylesheet cannot flatten the prompt -----------------------------
+# GTK loads ~/.config/gtk-4.0/gtk.css above an application's own provider, and @importing a theme
+# from exactly there is how a GTK3-era theme gets applied to GTK4 at all. Themes open with a reset
+# — Sweet's is `* { padding: 0 }` — which used to leave every field hard against the border.
+mkdir -p "$DIR/themed-home/.config/gtk-4.0"
+echo '* { padding: 0; }' >"$DIR/themed-home/.config/gtk-4.0/gtk.css"
+LAUNCH_ENV="HOME=$DIR/themed-home"
+launch_generic --title inset --body "the theme does not own the layout"
+settled
+read -r dx dy _ _ <<<"$(geom dialog)"
+read -r px py _ _ <<<"$(geom prominent)"
+if [[ -n ${py:-} && -n ${dy:-} ]] && (( px - dx >= 10 && py - dy >= 10 )); then
+    ok "a user stylesheet's padding reset does not reach the dialog"
+else
+    bad "themed padding" "dialog $dx,$dy vs prominent ${px:-?},${py:-?}"
+fi
+wdotool key Escape; finished >/dev/null
+LAUNCH_ENV=""
 watch gate
 
 # --- minimize and the chip --------------------------------------------------

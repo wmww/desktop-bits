@@ -327,15 +327,25 @@ fn teardown(state: &State) {
     }
 }
 
+/// Above `GTK_STYLE_PROVIDER_PRIORITY_USER`, which is where GTK loads
+/// `~/.config/gtk-4.0/gtk.css` — and forcing a GTK3-era theme on GTK4 by `@import`ing its
+/// stylesheet from that file is how people actually install one (libadwaita apps ignore
+/// `gtk-theme-name`, so it is the only thing that works). That puts a whole theme *above* the
+/// application priority a prompt would normally use, and themes open with a reset: Sweet's is
+/// `* { padding: 0; }`, which collapsed every padding here — the dialog's own, the viewports',
+/// the buttons' — while leaving the colours it does not mention. The result had the text against
+/// the border on all four sides.
+///
+/// So the prompt's layout is not the theme's to override. Colour still is: `@theme_*` resolve
+/// through the whole cascade whatever priority we sit at, and this stylesheet only names
+/// properties it means to fix.
+const CSS_PRIORITY: u32 = gtk::STYLE_PROVIDER_PRIORITY_USER + 1;
+
 fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(dialog::CSS);
     if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
+        gtk::style_context_add_provider_for_display(&display, &provider, CSS_PRIORITY);
     }
 }
 
@@ -658,6 +668,9 @@ fn log_geometry(window: &gtk::Window, d: &Dialog) {
             );
         }
     };
+    // The dialog itself, so a test can see how far its contents sit inside its border — which is
+    // what a theme loaded above our stylesheet used to flatten. See `CSS_PRIORITY`.
+    one("dialog", &d.root);
     one("approve", d.approve.upcast_ref());
     one("deny", d.deny.upcast_ref());
     if let Some(m) = &d.minimize {

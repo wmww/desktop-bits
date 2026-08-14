@@ -80,6 +80,15 @@ scrubbed (verified with a fake `HOME` under headless sway — both keys):
 Sweet defines no `@accent_color`, which is why the prompt's stylesheet sticks to legacy colour
 names.
 
+**How the theme actually gets loaded here (checked 2026-08-13).** `~/.config/gtk-4.0/gtk.css` on
+this host is one line — `@import url("file:///usr/share/themes/Sweet-Mars/gtk-4.0/gtk.css")` —
+written by `desktop-setup.sh`. That is the only thing that themes GTK4/libadwaita apps, which
+ignore `gtk-theme-name`, and it loads the whole theme at `PRIORITY_USER` (800), *above* an
+application's own stylesheet at 600. Sweet opens with `* { padding: 0 }`, so every app-set padding
+in the prompt vanished; `permission-prompt-ui` now installs its stylesheet at `PRIORITY_USER + 1`.
+Assume root has the same file if root's desktop looks themed — the same reset would reach the
+gate.
+
 ## Distro
 
 Arch, stock `sudo` (1.9.17 as of 2026-07). Possible future switch to sudo-rs, which has no plugin

@@ -12,7 +12,7 @@ sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its pa
 sudo-prompt/verify.sh   read-only check of a deployed setup (setup itself is manual, see README)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-tests/gui-test.sh       44 behavioural checks in a nested sway
+tests/gui-test.sh       45 behavioural checks in a nested sway
 ~~~
 
 ## Goal and threat model
@@ -411,6 +411,18 @@ GTK details, each of which cost an afternoon:
   `@theme_selected_bg_color`, never the same colour, because those two must not be confusable
   whatever the theme does. The approve button clears `border` and `box-shadow`: the theme draws a
   button outline in its own button colour, which around a filled accent is a stray hairline.
+- **The stylesheet sits above `PRIORITY_USER`, not at `PRIORITY_APPLICATION`.** GTK loads
+  `~/.config/gtk-4.0/gtk.css` at `GTK_STYLE_PROVIDER_PRIORITY_USER` (800), above the 600 an
+  application's own provider normally gets — and `@import`ing a theme's stylesheet from exactly
+  that file is how a GTK3-era theme is applied to GTK4 at all (libadwaita apps ignore
+  `gtk-theme-name`, so nothing else works). That puts a whole theme above the prompt, and themes
+  open with a reset: Sweet's is `* { padding: 0 }`, which collapsed the dialog's padding, the
+  viewports' and the buttons' — every field hard against the border on all four sides, the approve
+  fill gone — while leaving every colour the theme does not mention. Layout is not the theme's to
+  override, so `app::CSS_PRIORITY` is `PRIORITY_USER + 1`. Colour still is: `@theme_*` resolve
+  through the whole cascade whatever priority we sit at. A GUI test launches the presenter with a
+  `HOME` holding just that reset and checks the fields are still inset from the dialog's border,
+  which is what the `geometry: dialog` line is for.
 - **Only legacy colour names.** `@accent_color` and the rest of the libadwaita set exist in GTK's
   own theme and in few others; under Sweet (a GTK3-era theme, and the one on this host) the approve
   button came out with no fill at all, because GTK drops a declaration naming an undefined colour
