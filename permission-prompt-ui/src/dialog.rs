@@ -323,6 +323,14 @@ fn build_value(field: &Field) -> (gtk::Widget, Vec<gtk::Widget>, Option<gtk::Lab
             } else {
                 MAX_VIEWPORT_HEIGHT
             });
+            // Width is what makes the dialog grow with the command. Without this the viewport
+            // asks for its child's *minimum* width, which for a label that wraps mid-word is one
+            // column — so the dialog came out as narrow as its button row however many arguments
+            // it was showing. The ceiling is not here: a horizontal policy of `Never` makes
+            // `max-content-width` a no-op, so the widest a field asks to be is set on the label
+            // (see `text::mono_block`). The minimum stays the child's one column, so a
+            // cramped output still shrinks the viewport rather than the trusted fields.
+            scroller.set_propagate_natural_width(true);
 
             // The overflow count floats over the bottom of the viewport rather than taking a row
             // of its own, so it costs nothing when it is not shown and no layout jump when it is.

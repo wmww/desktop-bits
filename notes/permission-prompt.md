@@ -327,8 +327,24 @@ where keys still answer the prompt.
 
 Nothing scrolls sideways: the viewports are `PolicyType::Never` horizontally and the content wraps.
 A field that scrolls horizontally can hide its tail behind nothing louder than a scrollbar, and the
-tail of a command line is where the interesting argument tends to be. `max-width-chars` is what
-bounds the *natural* width so a long line wraps instead of making the whole dialog that wide.
+tail of a command line is where the interesting argument tends to be.
+
+Width grows with the content, up to 80 monospace columns (`text::MONO_WRAP_CHARS`), and two GTK
+facts decide that:
+
+- A `ScrolledWindow` asks for its child's *minimum* width unless `propagate-natural-width` is set,
+  and the minimum of a label that wraps mid-word is one column. Without propagation the dialog was
+  as narrow as its button row however many arguments it was showing, so the command wrapped at ~25
+  columns in a box with empty screen either side.
+- `max-content-width` is a no-op under a horizontal policy of `Never`, so it cannot be the ceiling.
+  The ceiling is the label's `max-width-chars`, which bounds the *natural* width so a long line
+  wraps instead of making the whole dialog that wide.
+
+Columns rather than pixels, because the fields are monospace and a terminal's width is the shape
+this text is written for. The prominent field is 1.3em, so 80 of its columns is ~920px and the
+plainer fields' 80 are ~700px; both hug their content when it is shorter. Minimum width is
+untouched — one column — so the shrink-on-a-cramped-output behaviour above is unchanged, verified
+again at 480x360.
 
 GTK details, each of which cost an afternoon:
 

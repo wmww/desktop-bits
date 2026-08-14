@@ -11,8 +11,12 @@ use gtk::prelude::*;
 
 use crate::untrusted::Escaped;
 
-/// How wide a monospace field asks to be before it wraps, in characters.
-const MONO_WRAP_CHARS: i32 = 56;
+/// How wide a monospace field asks to be before it wraps, in columns. This is the dialog's width
+/// ceiling in practice: the caller-controlled viewports propagate their natural width, so the
+/// dialog is as wide as its longest field wants and stops growing here. Columns rather than pixels
+/// because the fields are monospace — a terminal's width is the shape this text is written for —
+/// and because the horizontal scroll policy makes the viewport's own pixel ceiling a no-op.
+const MONO_WRAP_CHARS: i32 = 80;
 
 /// A label that renders its text literally, and whose text the reader can select and copy.
 ///
@@ -73,8 +77,8 @@ pub fn wrapped(text: &Escaped, classes: &[&str]) -> gtk::Label {
 ///
 /// Wraps rather than running off to the right: a field that scrolls sideways can hide its tail,
 /// and `max-width-chars` is what keeps a long one from making the whole dialog that wide before it
-/// gets the chance to wrap. Nothing here ever ellipsizes — dropping caller bytes silently is the
-/// one thing this field must not do.
+/// gets the chance to wrap — a short command still gets a narrow dialog. Nothing here ever
+/// ellipsizes — dropping caller bytes silently is the one thing this field must not do.
 pub fn mono_block(text: &Escaped, classes: &[&str]) -> gtk::Label {
     let l = label(text, &["pp-mono"]);
     for c in classes {
