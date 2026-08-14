@@ -2,7 +2,7 @@
 //! reusable options parser it could be steered with.
 
 use permission_prompt_ui::dialog::{DialogSpec, Field, Style};
-use permission_prompt_ui::{Escaped, Untrusted};
+use permission_prompt_ui::{ChipSpec, Escaped, Untrusted};
 
 use crate::cli::Request;
 use crate::cmdenv::{CommandEnv, Provenance};
@@ -44,6 +44,12 @@ pub fn build(
     }
     let command = Escaped::concat(parts);
     let command_log = command.as_str().to_string();
+    // The same line the prompt leads with, and the same name the origin line carries: the chip is
+    // the prompt shrunk, not a second, looser account of the request.
+    let chip = ChipSpec {
+        command: command.clone(),
+        user: Escaped::of(&Untrusted::from_bytes(prov.user.clone())),
+    };
     // First and loudest, with no heading above it: the command *is* the question, and a sentence
     // asking it in the gate's own words would only push the answer further down.
     fields.push(Field::untrusted("", vec![command]).expanding().prominent());
@@ -120,6 +126,7 @@ pub fn build(
             // Always: the gate has no options, and a caller-visible flag for this would be a
             // caller-controlled one.
             response: true,
+            chip: Some(chip),
         },
         command_log,
     }
@@ -265,6 +272,17 @@ mod tests {
     fn a_token_with_escapes_gets_ansi_c_quoting() {
         let r = render(&["--", "/bin/echo", "two\nlines"]);
         assert_eq!(command(&r).lines[0].as_str(), "/bin/echo $'two\\x0alines'");
+    }
+
+    /// The chip is the prompt shrunk, not a second account of the request: same shell-quoted line,
+    /// same requester name, both already escaped.
+    #[test]
+    fn the_chip_carries_the_prompts_own_command_and_requester() {
+        let r = render(&["--", "/usr/bin/rm", "-rf", "/tmp/a b"]);
+        let chip = r.spec.chip.as_ref().expect("the gate can be minimized");
+        assert_eq!(chip.command.as_str(), command(&r).lines[0].as_str());
+        assert_eq!(chip.command.as_str(), r.command_log);
+        assert_eq!(chip.user.as_str(), "ai");
     }
 
     #[test]

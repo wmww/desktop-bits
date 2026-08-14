@@ -81,6 +81,32 @@ wait_log() {
 # Wait for the surface to be up (geometry logged), then for the controls to be answerable.
 presented() { wait_log "geometry: approve"; }
 settled()   { wait_log "controls live"; }
+chipped()   { wait_log "chip presented"; }
+
+# This session's gate processes only. A bare `pkill -x sudo-prompt` also kills the gate another
+# agent is driving in a different guibox session on the same machine, which shows up here as
+# unrelated tests failing with "signal 15".
+gate_pids() {
+    local p
+    for p in $(pgrep -x sudo-prompt); do
+        grep -qz "SUDO_PROMPT_TEST_DISPLAY_ROOT=$DIR" "/proc/$p/environ" 2>/dev/null && echo "$p"
+    done
+}
+
+# The names sway currently has outputs under. Unplugging and creating them renumbers, so nothing
+# below hardcodes HEADLESS-N.
+outputs() { swaymsg -t get_outputs -r | grep -oE '"name": "[^"]+"' | cut -d'"' -f4; }
+
+# Wait for a marker in another client's log (the generic presenter stands in for the desktop and
+# for a rival lock client).
+wait_other() {
+    local i
+    for i in $(seq 1 60); do
+        grep -q "$2" "$1" 2>/dev/null && return 0
+        sleep 0.25
+    done
+    return 1
+}
 
 finished() {
     local i
@@ -389,10 +415,7 @@ done
 
 # --- signals ----------------------------------------------------------------
 launch /bin/echo should-not-run; settled
-# Match this checkout's binary and this launch's argv exactly, not every `sudo-prompt` on the host:
-# a bare `-x sudo-prompt` also kills a second worktree running this suite, and a `-f` substring also
-# matches the `sh -c` wrapper that records the exit status.
-pkill -TERM -x -f "$GATE -- /bin/echo should-not-run"
+kill -TERM $(gate_pids)
 if finished && [[ $(status) == 125 ]] && gatelog | grep -q "signal 15"; then
     ok "SIGTERM denies"
 else
@@ -485,6 +508,98 @@ else
 fi
 watch gate
 
+# --- minimize and the chip --------------------------------------------------
+# Minimizing hands the desktop back: the lock goes, a chip appears in the corner of the output, and
+# the gate keeps its flock and its pending decision.
+launch /bin/echo minimize-me; settled
+# shellcheck disable=SC2046
+wdotool mousemove $(center minimize) click 1
+if chipped && gatelog | grep -q "session unlocked" && [[ -z $(status) ]]; then
+    ok "minimize unlocks the session and puts a chip on the output"
+else
+    bad "minimize" "status=$(status)"
+fi
+
+# The desktop is not merely visible but usable: a layer client mapped now takes the keyboard, which
+# under a lock surface it could not. The chip asks for no keyboard at all, so the Escape below can
+# only reach the client that did.
+rm -f "$DIR/desktop.log"
+swaymsg exec "env RUST_LOG=debug $GENERIC --surface layer --title 'desktop check' \
+    --body 'the desktop is usable again' >$DIR/desktop.log 2>&1" >/dev/null
+if wait_other "$DIR/desktop.log" "controls live"; then
+    wdotool key Escape
+    if wait_other "$DIR/desktop.log" "verdict: Denied" && [[ -z $(status) ]]; then
+        ok "the desktop takes the keyboard back while the prompt is minimized"
+    else
+        bad "minimized desktop input" "gate status=$(status)"
+    fi
+else
+    bad "minimized desktop input" "the layer client never settled"
+fi
+
+# Anywhere but the X expands, and the prompt that comes back is a fresh lock with a fresh quiet
+# period — which is what makes baiting a double-click useless.
+# shellcheck disable=SC2046
+wdotool mousemove $(center chip-body) click 1
+if wait_log "controls live" 2 && gatelog | grep -q "expanded" \
+    && [[ $(grep -c "session locked" "$DIR/gate.log") == 2 ]] \
+    && [[ $(grep -c "controls settling" "$DIR/gate.log") == 2 ]]; then
+    ok "a click on the chip body relocks the session and settles again"
+else
+    bad "chip expand" "status=$(status); log: $(gatelog | tail -3)"
+fi
+wdotool key Escape
+if finished && [[ $(status) == 125 ]]; then
+    ok "the expanded prompt answers as it did before"
+else
+    bad "expanded prompt answers" "status=$(status)"
+fi
+
+launch /bin/echo chip-denies; settled
+# shellcheck disable=SC2046
+wdotool mousemove $(center minimize) click 1; chipped
+# shellcheck disable=SC2046
+wdotool mousemove $(center chip-cancel) click 1
+if finished && [[ $(status) == 125 ]] && gatelog | grep -q "User denied sudo :(" \
+    && ! gatelog | grep -q "expanded"; then
+    ok "the chip's X denies rather than expanding"
+else
+    bad "chip deny" "status=$(status)"
+fi
+
+# Someone else takes the only session lock while the prompt is minimized. The press is held across
+# the theft so the release still reaches the chip — the compositor keeps delivering to the surface a
+# press began on — and the relock then has to fail closed.
+launch /bin/echo relock-fails; settled
+# shellcheck disable=SC2046
+wdotool mousemove $(center minimize) click 1; chipped
+read -r bx by <<<"$(center chip-body)"
+wdotool mousemove "$bx" "$by" mousedown 1
+rm -f "$DIR/rival.log"
+swaymsg exec "env RUST_LOG=debug $GENERIC --surface session-lock --title 'other lock client' \
+    --body holding >$DIR/rival.log 2>&1" >/dev/null
+wait_other "$DIR/rival.log" "session locked"
+wdotool mouseup 1
+if finished && [[ $(status) == 125 ]] && gatelog | grep -q "could not take the session lock"; then
+    ok "expanding onto a session lock somebody else took fails closed"
+else
+    bad "relock failure" "status=$(status); log: $(gatelog | tail -3)"
+fi
+wait_other "$DIR/rival.log" "controls live"
+wdotool key Escape
+wait_other "$DIR/rival.log" "session unlocked"
+
+# Minimize is dead while the prompt settles, exactly like the other two controls.
+launch /bin/echo settle-check; presented
+# shellcheck disable=SC2046
+wdotool mousemove $(center minimize) click 1
+if settled && [[ -z $(status) ]] && ! gatelog | grep -q "minimized"; then
+    ok "minimize does nothing during the quiet period"
+else
+    bad "minimize while settling" "status=$(status)"
+fi
+wdotool key Escape; finished >/dev/null
+
 # --- hotplug ----------------------------------------------------------------
 launch /bin/echo hotplug; settled
 swaymsg create_output >/dev/null
@@ -507,6 +622,35 @@ if finished && [[ $(status) == 125 ]] && gatelog | grep -q "no outputs left"; th
     ok "losing the last output denies rather than holding the locks"
 else
     bad "last output lost" "status=$(status)"
+fi
+
+# --- outputs while minimized ------------------------------------------------
+# The section above left the session with no outputs at all.
+swaymsg create_output >/dev/null
+for _ in $(seq 1 40); do [[ -n $(outputs) ]] && break; sleep 0.25; done
+
+launch /bin/echo chip-hotplug; settled
+# shellcheck disable=SC2046
+wdotool mousemove $(center minimize) click 1; chipped
+swaymsg create_output >/dev/null
+if wait_log "chip presented" 2; then
+    ok "a hotplugged output gets its own chip"
+else
+    bad "chip hotplug add" "$(grep -c 'chip presented' "$DIR/gate.log") chips"
+fi
+first=$(outputs | head -1)
+swaymsg output "$(outputs | tail -1)" unplug >/dev/null
+wait_log "monitor removed"; sleep 0.5
+if [[ -z $(status) ]]; then
+    ok "losing one output of two keeps the chip"
+else
+    bad "chip hotplug remove" "status=$(status); log: $(gatelog | tail -3)"
+fi
+swaymsg output "$first" unplug >/dev/null
+if finished && [[ $(status) == 125 ]] && gatelog | grep -q "no outputs left"; then
+    ok "losing the last output while minimized denies rather than waiting"
+else
+    bad "last output lost while minimized" "status=$(status)"
 fi
 
 echo

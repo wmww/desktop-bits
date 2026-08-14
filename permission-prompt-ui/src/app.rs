@@ -10,6 +10,7 @@ use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
 
+use crate::chip::{self, Chip};
 use crate::dialog::{self, Dialog, DialogSpec};
 use crate::settle::{Settle, SettleState};
 use crate::text;
@@ -73,10 +74,13 @@ pub struct PromptConfig {
     pub lock_required: bool,
 }
 
-/// Everything that outlives one set of surfaces. The response buffer lives here rather than in
-/// [`Inner`] so every output's entry shares it, and so it survives a rebuild of the windows.
+/// Everything that outlives one set of surfaces — and, with the chip, one whole phase. The
+/// response buffer lives here rather than in [`Inner`] so every output's entry shares it, and so
+/// it survives both a rebuild of the windows and a trip through the chip.
+///
+/// The config is an `Rc` of its own because the chip phase takes it alone, without the buffer.
 struct Ui {
-    cfg: PromptConfig,
+    cfg: Rc<PromptConfig>,
     response: Option<text::ResponseBuffer>,
 }
 
@@ -136,6 +140,12 @@ pub fn init() -> Result<(), String> {
     Ok(())
 }
 
+/// How a full-prompt phase ended: with a decision, or with the human shrinking it to the chip.
+enum Full {
+    Decided(Verdict),
+    Minimize,
+}
+
 struct Inner {
     settle: Settle,
     /// Last settle state pushed to the dialogs, so we only touch widgets on a change.
@@ -143,7 +153,10 @@ struct Inner {
     windows: Vec<(gtk::Window, Rc<Dialog>)>,
     /// Hardware keycodes currently down, so a synthesized autorepeat is never a fresh press.
     held: HashSet<u32>,
-    verdict: Option<Verdict>,
+    outcome: Option<Full>,
+    /// Set with the outcome and never cleared, so a late callback cannot restart a phase whose
+    /// outcome has already been taken out (teardown destroys windows, which fires `destroy`).
+    over: bool,
     /// The compositor has confirmed the lock. A lock surface exists only inside the lock, so
     /// nothing is presented before this.
     locked: bool,
@@ -156,93 +169,162 @@ struct Inner {
 }
 
 impl Inner {
+    /// This phase has not ended yet.
+    fn live(&self) -> bool {
+        !self.over
+    }
+
     /// Records the decision and stops the loop. Deliberately does *not* unlock: the unlock needs a
     /// Wayland roundtrip, during which GTK emits signals whose handlers borrow this same state.
     /// [`run`] unlocks once, outside every callback.
     fn finish(&mut self, verdict: Verdict) {
-        if self.verdict.is_some() {
+        if !self.live() {
             return;
         }
         log::debug!("verdict: {verdict:?}");
-        self.verdict = Some(verdict);
+        self.outcome = Some(Full::Decided(verdict));
+        self.over = true;
+        self.main_loop.quit();
+    }
+
+    /// The human asked for the prompt to get out of the way. Same path as a verdict: the loop
+    /// quits and the unlock happens outside every callback.
+    fn minimize(&mut self) {
+        if !self.live() {
+            return;
+        }
+        // The tests key on this line.
+        log::debug!("minimized");
+        self.outcome = Some(Full::Minimize);
+        self.over = true;
         self.main_loop.quit();
     }
 }
 
 type State = Rc<RefCell<Inner>>;
 
+/// The prompt, from first surface to answer.
+///
+/// Lock transitions only ever happen here, in straight-line code between main loops: unlocking
+/// inside a GTK callback deadlocks on the state `RefCell`, because the roundtrip makes GTK emit
+/// signals whose handlers borrow the same state. Each lock epoch is therefore its own *phase* with
+/// its own fresh state and its own main loop, and everything per-phase — the quiet period and its
+/// cap, held keys, the surfaces, the zero-output timer — resets for free. What outlives a phase
+/// lives in [`Ui`], so a response typed before minimizing is still there afterwards.
 pub fn run(cfg: PromptConfig) -> Answer {
     install_css();
+    install_signal_handlers();
     let ui = Rc::new(Ui {
         response: cfg.spec.response.then(text::ResponseBuffer::new),
-        cfg,
+        cfg: Rc::new(cfg),
     });
+
+    loop {
+        let state = run_full_phase(&ui);
+        let outcome = state.borrow_mut().outcome.take();
+
+        // Every survivable exit path lands here: approval (before the exec), denial, the settle
+        // cap, the signal handlers, every operational error after lock() succeeded, and the
+        // minimize that hands the desktop back.
+        unlock_and_sync();
+        // Tear the lock reference down after the loop, so nothing can re-enter it.
+        ACTIVE_LOCK.with(|l| {
+            if let Ok(mut l) = l.try_borrow_mut() {
+                *l = None;
+            }
+        });
+        teardown(&state);
+
+        match outcome {
+            Some(Full::Decided(v)) => return answer(&ui, v),
+            None => {
+                return Answer::bare(Verdict::Error("prompt exited without a decision".to_string()))
+            }
+            // The desktop is the human's again while they check whatever made them hesitate. The
+            // gate's flock is still held, so other requests stay behind this one.
+            Some(Full::Minimize) => {}
+        }
+
+        // The chip gets the config and nothing else: it has no response box, and no way to reach
+        // the one the full prompt keeps.
+        match chip::run_phase(&ui.cfg) {
+            Chip::Decided(v) => return answer(&ui, v),
+            // Round again from scratch: a fresh lock epoch, fresh surfaces and a fresh quiet
+            // period. That the expanding click is itself input, and so restarts the quiet period,
+            // is what makes baiting a double-click useless.
+            Chip::Expand => {}
+        }
+    }
+}
+
+/// Pair a verdict with whatever the human typed. Read here rather than at the verdict: the phase's
+/// loop has quit by now, so nothing can be typed in between, and the buffer stays out of the state
+/// every callback borrows.
+fn answer(ui: &Rc<Ui>, verdict: Verdict) -> Answer {
+    let response = match verdict {
+        Verdict::Approved | Verdict::Denied => ui.response.as_ref().and_then(|b| b.text()),
+        _ => None,
+    };
+    Answer { verdict, response }
+}
+
+/// One lock epoch: fresh state, fresh surfaces, fresh quiet period, one main loop. Returns the
+/// phase's state with its outcome recorded, for the caller to unlock and tear down.
+fn run_full_phase(ui: &Rc<Ui>) -> State {
     let state: State = Rc::new(RefCell::new(Inner {
         settle: Settle::new(ui.cfg.settle, ui.cfg.cap),
         shown_settled: None,
         windows: Vec::new(),
         held: HashSet::new(),
-        verdict: None,
+        outcome: None,
+        over: false,
         locked: false,
         pending: Vec::new(),
         main_loop: glib::MainLoop::new(None, false),
         fallback_done: false,
     }));
 
-    install_signal_handlers();
     install_settle_timer(&state);
+    install_signal_timer(&state);
 
     match ui.cfg.mode {
         SurfaceMode::SessionLock => {
-            if let Err(e) = start_session_lock(&ui, &state) {
+            if let Err(e) = start_session_lock(ui, &state) {
                 // `failed` can arrive before `lock()` returns, and its message is the more
-                // specific one.
-                let recorded = state.borrow_mut().verdict.take();
-                unlock_and_sync();
-                return Answer::bare(recorded.unwrap_or(Verdict::Error(e)));
+                // specific one, so it wins by already being recorded.
+                state.borrow_mut().finish(Verdict::Error(e));
+                return state;
             }
         }
         SurfaceMode::Layer => {
-            if let Err(e) = start_layer(&ui, &state) {
-                return Answer::bare(Verdict::Error(e));
+            if let Err(e) = start_layer(ui, &state) {
+                state.borrow_mut().finish(Verdict::Error(e));
+                return state;
             }
         }
-        SurfaceMode::Toplevel => start_toplevel(&ui, &state),
+        SurfaceMode::Toplevel => start_toplevel(ui, &state),
         SurfaceMode::Auto => {
-            if start_session_lock(&ui, &state).is_err() {
-                fall_back(&ui, &state);
+            if start_session_lock(ui, &state).is_err() {
+                fall_back(ui, &state);
             }
         }
     }
 
     let main_loop = state.borrow().main_loop.clone();
-    if state.borrow().verdict.is_none() {
+    if state.borrow().live() {
         main_loop.run();
     }
+    state
+}
 
-    // Every survivable exit path lands here: approval (before the exec), denial, the settle cap,
-    // the signal handlers, and every operational error after lock() succeeded.
-    unlock_and_sync();
-
-    // Tear the lock reference down after the loop, so nothing can re-enter it.
-    ACTIVE_LOCK.with(|l| {
-        if let Ok(mut l) = l.try_borrow_mut() {
-            *l = None;
-        }
-    });
-
-    let verdict = state
-        .borrow_mut()
-        .verdict
-        .take()
-        .unwrap_or_else(|| Verdict::Error("prompt exited without a decision".to_string()));
-    // Read once here rather than at the verdict: `finish` quits the loop, so nothing can be typed
-    // between the two, and this keeps the buffer out of the state every callback borrows.
-    let response = match verdict {
-        Verdict::Approved | Verdict::Denied => ui.response.as_ref().and_then(|b| b.text()),
-        _ => None,
-    };
-    Answer { verdict, response }
+/// Drop a finished phase's surfaces. After the unlock, so nothing here runs against a window the
+/// compositor still believes is a lock surface.
+fn teardown(state: &State) {
+    let windows: Vec<gtk::Window> = state.borrow_mut().windows.drain(..).map(|(w, _)| w).collect();
+    state.borrow_mut().pending.clear();
+    for window in windows {
+        window.destroy();
+    }
 }
 
 fn install_css() {
@@ -257,7 +339,7 @@ fn install_css() {
     }
 }
 
-/// Set by the signal handler, read by the settle timer. glib no longer wraps
+/// Set by the signal handler, read by whichever phase is running. glib no longer wraps
 /// `g_unix_signal_add`, and an atomic store is the only thing worth doing in a handler anyway.
 static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
@@ -280,16 +362,39 @@ fn install_signal_handlers() {
     }
 }
 
+/// The signal the handler recorded, if any. Both phases poll for it; the chip phase has no settle
+/// timer to hang it off, and a signal is a denial in either.
+pub(crate) fn take_signal() -> Option<i32> {
+    match PENDING_SIGNAL.swap(0, Ordering::Relaxed) {
+        0 => None,
+        sig => Some(sig),
+    }
+}
+
+/// Consumes the flag only while this phase is live, so a signal cannot be swallowed by an outgoing
+/// phase's timer during a phase change.
+fn install_signal_timer(state: &State) {
+    let state = state.clone();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        let mut st = state.borrow_mut();
+        if !st.live() {
+            return glib::ControlFlow::Break;
+        }
+        match take_signal() {
+            Some(sig) => {
+                st.finish(Verdict::DeniedSignal(sig));
+                glib::ControlFlow::Break
+            }
+            None => glib::ControlFlow::Continue,
+        }
+    });
+}
+
 fn install_settle_timer(state: &State) {
     let state = state.clone();
     glib::timeout_add_local(Duration::from_millis(50), move || {
         let mut st = state.borrow_mut();
-        if st.verdict.is_some() {
-            return glib::ControlFlow::Break;
-        }
-        let sig = PENDING_SIGNAL.swap(0, Ordering::Relaxed);
-        if sig != 0 {
-            st.finish(Verdict::DeniedSignal(sig));
+        if !st.live() {
             return glib::ControlFlow::Break;
         }
         match st.settle.poll(Instant::now()) {
@@ -315,12 +420,20 @@ fn install_settle_timer(state: &State) {
     });
 }
 
+/// Minimizing needs both something for the chip to show and a surface worth getting out of the way
+/// of. The other surface modes do not seize the screen, so there is nothing there to minimize —
+/// and the gate, which is the only caller that fills in a [`ChipSpec`](crate::chip::ChipSpec),
+/// only ever asks for the session lock.
+fn minimizable(cfg: &PromptConfig) -> bool {
+    cfg.spec.chip.is_some() && cfg.mode == SurfaceMode::SessionLock
+}
+
 fn new_window(ui: &Rc<Ui>, state: &State) -> (gtk::Window, Rc<Dialog>) {
     let window = gtk::Window::new();
     window.add_css_class("pp-window");
     window.set_title(Some(ui.cfg.spec.title));
 
-    let d = Rc::new(dialog::build(&ui.cfg.spec, ui.response.as_ref()));
+    let d = Rc::new(dialog::build(&ui.cfg.spec, ui.response.as_ref(), minimizable(&ui.cfg)));
     if let Some(shown) = state.borrow().shown_settled {
         d.set_settled(shown);
     }
@@ -451,6 +564,12 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
         let state = state.clone();
         move |_| state.borrow_mut().finish(Verdict::Denied)
     });
+    if let Some(m) = &d.minimize {
+        m.connect_clicked({
+            let state = state.clone();
+            move |_| state.borrow_mut().minimize()
+        });
+    }
 
     // A prompt whose focus the compositor moved away and back must not be live the instant it
     // returns, and a key held across a focus change must not look like a fresh press.
@@ -516,7 +635,7 @@ fn wire_presentation(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
             return glib::ControlFlow::Continue;
         }
         let mut st = state.borrow_mut();
-        if st.verdict.is_none() {
+        if st.live() {
             log::debug!("surface presented; (re)starting the quiet period");
             st.settle.restart(Instant::now());
             log_geometry(window, &d);
@@ -541,6 +660,9 @@ fn log_geometry(window: &gtk::Window, d: &Dialog) {
     };
     one("approve", d.approve.upcast_ref());
     one("deny", d.deny.upcast_ref());
+    if let Some(m) = &d.minimize {
+        one("minimize", m.upcast_ref());
+    }
     if let Some(p) = &d.prominent {
         one("prominent", p.upcast_ref());
     }
@@ -555,7 +677,7 @@ fn wire_destroy(window: &gtk::Window, state: &State) {
     window.connect_destroy(move |w| {
         let mut st = state.borrow_mut();
         st.windows.retain(|(other, _)| other != w);
-        if st.windows.is_empty() && st.verdict.is_none() {
+        if st.windows.is_empty() && st.live() {
             // Holding the locks with nothing on screen is worse than failing.
             st.finish(Verdict::Error("no outputs left to present the prompt on".to_string()));
         }
@@ -643,7 +765,7 @@ fn start_session_lock(ui: &Rc<Ui>, state: &State) -> Result<(), String> {
     let state = state.clone();
     glib::timeout_add_local_once(Duration::from_millis(2000), move || {
         let mut st = state.borrow_mut();
-        if st.windows.is_empty() && st.verdict.is_none() {
+        if st.windows.is_empty() && st.live() {
             st.finish(Verdict::Error("no outputs to present the prompt on".to_string()));
         }
     });
@@ -653,7 +775,7 @@ fn start_session_lock(ui: &Rc<Ui>, state: &State) -> Result<(), String> {
 fn fall_back(ui: &Rc<Ui>, state: &State) {
     {
         let mut st = state.borrow_mut();
-        if st.fallback_done || st.verdict.is_some() {
+        if st.fallback_done || !st.live() {
             return;
         }
         st.fallback_done = true;
@@ -719,7 +841,7 @@ fn watch_monitor(state: &State, monitor: &gdk::Monitor, window: &gtk::Window, de
         let mut st = state.borrow_mut();
         st.windows.retain(|(w, _)| *w != window);
         st.pending.retain(|w| *w != window);
-        let last = st.windows.is_empty() && st.verdict.is_none();
+        let last = st.windows.is_empty() && st.live();
         if last {
             st.finish(Verdict::Error("no outputs left to present the prompt on".to_string()));
         }

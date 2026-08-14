@@ -15,6 +15,12 @@ What is left:
 
 - The generic `permission-prompt` presenter in layer mode is still coverable. It is not an
   authorization boundary, so this is minor.
+- The gate's **minimize chip** is an overlay-layer surface, so it is coverable and spoofable by the
+  same uids. Accepted by design, because the chip is powerless: covering it hides a pending prompt,
+  which is the already-accepted DoS class; a fake chip's text is corrected the moment the real lock
+  surface shows the real argv; and tricking a click on either target yields a denial (safe) or an
+  expand back to the exclusive surface, behind a fresh quiet period. Approval is never reachable
+  from the chip.
 - The equivalent hazard moved up a protocol: a non-root uid that could bind
   `ext_session_lock_manager_v1` would get the same exclusivity, could lock the session before the
   gate does (blocking all sudo, since the gate fails closed) and could show an uncoverable fake

@@ -134,6 +134,9 @@ fn spec(args: &Args) -> DialogSpec {
         approve: APPROVE,
         deny: DENY,
         response: args.response,
+        // No minimizing: this prompt is not the one that seizes the screen, and it has no
+        // authority worth suspending. See `permission_prompt_ui::chip`.
+        chip: None,
     }
 }
 

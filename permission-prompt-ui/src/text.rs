@@ -18,6 +18,10 @@ use crate::untrusted::Escaped;
 /// and because the horizontal scroll policy makes the viewport's own pixel ceiling a no-op.
 const MONO_WRAP_CHARS: i32 = 80;
 
+/// How wide the chip's one-line fields ask to be before they ellipsize. Narrow on purpose: the chip
+/// sits in the corner of somebody's desktop, not in front of it.
+const CHIP_WRAP_CHARS: i32 = 44;
+
 /// A label that renders its text literally, and whose text the reader can select and copy.
 ///
 /// Selection is why a field is one label rather than one label per line: a selection cannot span
@@ -101,19 +105,64 @@ pub fn mono_block(text: &Escaped, classes: &[&str]) -> gtk::Label {
     l
 }
 
-/// A button whose child is a literal label and which can never be focused or activated by the
-/// toolkit's own key handling. Activation goes through the prompt's own state machine.
-pub fn button(text: &'static str, classes: &[&str]) -> gtk::Button {
+/// The shell both button constructors share: never focusable, never activatable by the toolkit's
+/// own key handling — activation goes through the prompt's own state machine — and always carrying
+/// an accessible label. The label is a required parameter rather than something a test checks
+/// after the fact, since a widget test would need a display to run.
+fn bare_button(label: &'static str, classes: &[&str]) -> gtk::Button {
     let b = gtk::Button::new();
     b.set_use_underline(false);
     b.set_can_focus(false);
     b.set_focus_on_click(false);
-    b.set_child(Some(&plain(&Escaped::literal(text), &["pp-button-label"])));
-    b.update_property(&[gtk::accessible::Property::Label(text)]);
+    b.update_property(&[gtk::accessible::Property::Label(label)]);
     for c in classes {
         b.add_css_class(c);
     }
     b
+}
+
+/// A button whose child is a literal label.
+pub fn button(text: &'static str, classes: &[&str]) -> gtk::Button {
+    let b = bare_button(text, classes);
+    b.set_child(Some(&plain(&Escaped::literal(text), &["pp-button-label"])));
+    b
+}
+
+/// A button whose face is drawn (see [`crate::icon`]) rather than written. It lives here beside
+/// [`button`] rather than with the artwork because the safety setup the two share is this module's
+/// to own — a drawing area is not a text widget, but the button around it is the same button.
+pub fn icon_button(
+    label: &'static str,
+    classes: &[&str],
+    draw: impl Fn(&gtk::DrawingArea, &gtk::cairo::Context, i32, i32) + 'static,
+) -> gtk::Button {
+    let b = bare_button(label, classes);
+    let face = gtk::DrawingArea::new();
+    face.set_content_width(crate::icon::SIZE);
+    face.set_content_height(crate::icon::SIZE);
+    // Centred rather than filling the button's content box, so the icon is drawn in a square and
+    // the artwork's proportions are the ones it was written for.
+    face.set_halign(gtk::Align::Center);
+    face.set_valign(gtk::Align::Center);
+    face.set_draw_func(draw);
+    b.set_child(Some(&face));
+    b
+}
+
+/// One line of caller text that gives up rather than growing: it ellipsizes at the end.
+///
+/// Only for the chip, and deliberately unlike [`mono_block`], which must never drop a byte because
+/// approval happens in front of it. The chip approves nothing, and the whole argv is one click
+/// away on the surface that does.
+pub fn ellipsized(text: &Escaped, classes: &[&str]) -> gtk::Label {
+    // Not selectable: the whole chip is one click target, and a drag across it must stay a click
+    // rather than becoming a text selection.
+    let l = plain(text, classes);
+    l.set_wrap(false);
+    l.set_single_line_mode(true);
+    l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    l.set_max_width_chars(CHIP_WRAP_CHARS);
+    l
 }
 
 /// Ceiling on the response, in characters. A response is a sentence; the ceiling only has to stop

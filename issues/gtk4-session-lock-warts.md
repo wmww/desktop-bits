@@ -35,6 +35,14 @@ Harmless — the client is on its way to exiting 125 — but it is noise on exac
 is most likely to be reading, and it suggests the failure teardown runs GTK window code against a
 surface that is no longer a toplevel.
 
+## Relocking in one process works, but is undocumented
+
+The minimize chip unlocks the session and later locks it again from the same process, with a fresh
+`GtkSessionLockInstance` per lock epoch (the old one is dropped after `unlock()` and a display
+roundtrip). That works — repeatedly, in a nested sway — but nothing in the header says whether an
+instance is single-use or whether a second lock from the same client is legal, so a client that
+needs it is relying on observed behaviour. Worth a sentence in the docs either way.
+
 ## Also worth documenting: monitor removal does not destroy the window
 
 The header says an assigned window "will be automatically unmapped and dereferenced when its monitor

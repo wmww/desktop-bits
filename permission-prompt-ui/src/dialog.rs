@@ -8,7 +8,8 @@
 
 use gtk::prelude::*;
 
-use crate::text;
+use crate::chip::ChipSpec;
+use crate::{icon, text};
 use crate::untrusted::Escaped;
 
 /// Tallest a caller-controlled viewport gets before it scrolls, and the taller allowance for the
@@ -16,6 +17,10 @@ use crate::untrusted::Escaped;
 /// still shrinks to nothing when the output cannot fit the dialog.
 const MAX_VIEWPORT_HEIGHT: i32 = 120;
 const MAX_EXPANDED_HEIGHT: i32 = 360;
+
+/// The minimize button's accessible label. Not caller data and not configurable: the button does
+/// one fixed thing.
+const MINIMIZE: &str = "Minimize";
 
 /// Width of the gutter the short field labels sit in.
 const GUTTER_WIDTH: i32 = 30;
@@ -123,11 +128,16 @@ pub struct DialogSpec {
     pub subtitle: Vec<Escaped>,
     pub fields: Vec<Field>,
     pub approve: &'static str,
+    /// The deny button's accessible label. The button itself is an X.
     pub deny: &'static str,
     /// Show a one-line box above the buttons for the human's own words. What they type comes back
     /// beside the verdict (see [`crate::app::Answer`]); it is an annotation on the answer, never a
     /// third answer.
     pub response: bool,
+    /// What the chip shows while the prompt is minimized. `Some` is what enables minimizing at
+    /// all — there is no separate flag, and the generic presenter passes `None` and gets today's
+    /// two-button dialog.
+    pub chip: Option<ChipSpec>,
 }
 
 /// One built dialog instance. Every output gets its own.
@@ -135,6 +145,8 @@ pub struct Dialog {
     pub root: gtk::Widget,
     pub approve: gtk::Button,
     pub deny: gtk::Button,
+    /// Built only for a prompt that can actually be minimized. See [`build`].
+    pub minimize: Option<gtk::Button>,
     /// The prominent field's value label, when the spec has one. Exposed so the presented-geometry
     /// log lines (see `app::log_geometry`) can name it; the GUI tests derive drag targets from
     /// those lines instead of hardcoding layout.
@@ -156,6 +168,12 @@ impl Dialog {
         if let Some(r) = &self.response {
             r.set_sensitive(settled);
         }
+        // Minimize is disabled with the others rather than treated as a harmless de-escalation:
+        // one rule for the whole row is what makes "the controls are dead while it settles"
+        // something the reader can see, and it keeps the input state machine untouched.
+        if let Some(m) = &self.minimize {
+            m.set_sensitive(settled);
+        }
     }
 }
 
@@ -165,7 +183,15 @@ const RESPONSE_PLACEHOLDER: &str = "Response";
 
 /// `response` is the buffer shared by every output's entry, and is `Some` exactly when
 /// `spec.response` is set — [`crate::app::run`] owns the one buffer and derives this from the spec.
-pub fn build(spec: &DialogSpec, response: Option<&text::ResponseBuffer>) -> Dialog {
+///
+/// `minimizable` is the caller's answer to "can this prompt be shrunk to a chip?" — it needs both a
+/// [`ChipSpec`] and a surface worth getting out of the way of, which only [`app`](crate::app) can
+/// answer.
+pub fn build(
+    spec: &DialogSpec,
+    response: Option<&text::ResponseBuffer>,
+    minimizable: bool,
+) -> Dialog {
     let dialog = gtk::Box::new(gtk::Orientation::Vertical, 12);
     dialog.add_css_class("pp-dialog");
     dialog.add_css_class(match spec.style {
@@ -200,7 +226,12 @@ pub fn build(spec: &DialogSpec, response: Option<&text::ResponseBuffer>) -> Dial
         e
     });
 
-    let deny = text::button(spec.deny, &["pp-deny"]);
+    // The two icons evoke a window's own decoration buttons while staying ordinary GTK buttons in
+    // the ordinary place. Approve keeps its words: it is the one control that has to say what it
+    // does.
+    let minimize = minimizable
+        .then(|| text::icon_button(MINIMIZE, &["pp-icon", "pp-minimize"], icon::minimize));
+    let deny = text::icon_button(spec.deny, &["pp-icon", "pp-deny"], icon::cross);
     let approve = text::button(spec.approve, &["pp-approve"]);
 
     let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -209,11 +240,14 @@ pub fn build(spec: &DialogSpec, response: Option<&text::ResponseBuffer>) -> Dial
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     bottom.append(&spacer);
+    if let Some(m) = &minimize {
+        bottom.append(m);
+    }
     bottom.append(&deny);
     bottom.append(&approve);
     dialog.append(&bottom);
 
-    let d = Dialog { root: dialog.upcast(), approve, deny, prominent, response };
+    let d = Dialog { root: dialog.upcast(), approve, deny, minimize, prominent, response };
     d.set_settled(false);
     d
 }
@@ -503,7 +537,10 @@ window.pp-window { background-color: @theme_bg_color; }
   margin: 2px 14px;
 }
 .pp-warn { color: @warning_color; }
-.pp-deny, .pp-approve { padding: 8px 20px; }
+.pp-approve { padding: 8px 20px; }
+/* Narrower than the text button, so the icon pair reads as square-ish decoration buttons rather
+   than as two more words. The vertical padding matches, so the row keeps its height. */
+.pp-icon { padding: 8px 12px; }
 /* No border and no theme highlight on the accented button: the theme draws a button outline in its
    own button colour, which around a filled accent reads as a stray hairline. */
 .pp-approve {
@@ -514,7 +551,20 @@ window.pp-window { background-color: @theme_bg_color; }
   color: @theme_selected_fg_color;
 }
 .pp-dialog.pp-gate .pp-approve { background-color: @error_color; }
-.pp-approve:disabled, .pp-deny:disabled { opacity: 0.45; }
+.pp-approve:disabled, .pp-icon:disabled { opacity: 0.45; }
+
+/* The chip: the whole prompt shrunk to a corner of the desktop while the human investigates. It
+   carries the gate's own border colour, so it cannot be read as a passing notification. */
+window.pp-chip-window { background-color: transparent; }
+.pp-chip {
+  background-color: @theme_base_color;
+  border: 2px solid @error_color;
+  border-radius: 10px;
+  padding: 6px 8px;
+  color: @theme_text_color;
+}
+.pp-chip-command { font-family: monospace; font-size: 0.95em; }
+.pp-chip-user { font-size: 0.8em; color: @insensitive_fg_color; }
 ";
 
 /// Theme colours [`CSS`] is allowed to name: the GTK3-era public set, which a theme written for

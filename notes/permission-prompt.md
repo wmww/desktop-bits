@@ -12,7 +12,7 @@ sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its pa
 sudo-prompt/verify.sh   read-only check of a deployed setup (setup itself is manual, see README)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-tests/gui-test.sh       34 behavioural checks in a nested sway
+tests/gui-test.sh       44 behavioural checks in a nested sway
 ~~~
 
 ## Goal and threat model
@@ -56,8 +56,9 @@ is gone, recovery is: log in as root and edit sudoers.
 
 Accepted, out of scope: a compromised root; pkexec (`issues/pkexec-root-prompt.md`); denial of
 service (a stuck or spammed prompt blocks all sudo and, because it holds the session lock, hides the
-desktop until dismissed — recovery is a root TTY; and since requests queue, a spam storm becomes a
-queue of prompts, each denial costing a settle period rather than ending it); a SIGKILLed gate leaving the session locked with
+desktop until the human answers it or minimizes it; and since requests queue, a spam storm becomes a
+queue of prompts, each denial costing a settle period rather than ending it — recovery from a prompt
+nobody can answer is a root TTY); a SIGKILLed gate leaving the session locked with
 no client; what the approved command then does, including a caller-writable `sudo ./script` changing
 between approval and exec.
 
@@ -305,7 +306,13 @@ accent colour and larger than anything else; the interpreter warning when there 
 line reading `user | cwd`; an `env` gutter row when the request has one; and the response box. No
 icon, no heading and no subtitle — the
 command *is* the question, and a sentence asking it in the gate's own words would only push the
-answer further down. The buttons ("Run as root" / "Cancel") say what the heading used to.
+answer further down. The button row is `[minimize] [X] [Run as root]`, and it says what the heading
+used to: approve keeps its words, because it is the one control that has to state what it does,
+while deny and minimize are cairo-drawn icons evoking a window's own decoration buttons. Drawn
+rather than glyphs, because no font glyph for "minimize" can be relied on and because drawing both
+keeps their stroke weight and colour identical — the colour is `widget.color()` read at draw time,
+so the theme and the `:disabled` fade reach them exactly as they reach a label. Each carries an
+accessible label, which its constructor requires.
 
 `cwd` is abbreviated with `~` against the *requesting* user's passwd home directory, never root's;
 the uid and gid are not shown at all, since the name answers "was this me?" and the log record keeps
@@ -464,6 +471,41 @@ many arguments it has, and dropping it would leave the field empty.
   moves focus to a label and typing goes back to being swallowed, which is harmless — Enter and
   Escape are global either way.
 
+### The minimize chip
+
+The human can shrink a live prompt to a small overlay-layer surface in the bottom-right corner of
+every output, use the desktop to check whatever made them hesitate, and come back to it. The chip
+shows the same shell-quoted command line — ellipsized — and the requesting user, plus an X.
+
+What makes that safe is that the chip is **powerless**: its only two actions are deny and expand.
+
+- Approval is reachable only on the session-lock surface, and only after a fresh quiet period.
+- The prompt always *starts* full and locked. Only a human click on the lock surface minimizes it,
+  and the gate has no options, so a caller cannot ask for a prompt that starts minimized. Keep it
+  that way.
+- The chip is on the overlay layer, which non-root uids can also draw on
+  (`issues/overlay-layer-spoofing.md`), so it is coverable and spoofable. Accepted by design:
+  covering it hides a pending prompt, which is the accepted DoS class; a fake's text is corrected
+  the moment the real lock surface shows the real argv; and a tricked click yields either a denial
+  (safe) or an expand.
+- The fresh quiet period on expand is load-bearing, not cosmetic: it defeats bait-a-double-click,
+  since the expanding click is itself input and the new lock surface starts settling from scratch.
+- A relock that fails — somebody else took the only session lock while we were minimized — is
+  `could not take the session lock`, consistent with "`failed` is a denial". Reachable in practice
+  only through the compositor's implicit pointer grab, which is how the GUI test provokes it.
+- The gate's flock is held throughout, so other sudo requests stay behind this one.
+- The chip asks for no keyboard (`KeyboardMode::None`), so its entire input surface is those two
+  click targets and the keyboard belongs to the desktop while it is up. Its exclusive zone is 0, so
+  it floats over the desktop rather than reshaping it.
+- Ellipsizing the command is right *here* and nowhere else: the chip approves nothing and the whole
+  argv is one click away. `mono_block`'s never-ellipsize rule still governs the surface where
+  approval happens.
+
+`chip: Option<ChipSpec>` on `DialogSpec` is the whole switch — there is no separate config flag. The
+generic presenter passes `None` and is unchanged, and minimize is offered only in
+`SurfaceMode::SessionLock`, since the other surfaces do not seize the screen and so have nothing to
+get out of the way of.
+
 ### Session lock discipline
 
 Order: flock → display selection → `lock()` → windows. `failed` is a denial, not a fallback trigger.
@@ -474,6 +516,22 @@ Order: flock → display selection → `lock()` → windows. `failed` is a denia
 - Monitor removal is detected via `GdkMonitor::invalidate`, not the window's `destroy`: the library
   unmaps and unrefs the window but we hold a strong reference, so no destroy fires. Losing the last
   output denies rather than holding both locks with nothing on screen.
+- **Lock transitions only ever happen between main loops.** Unlocking inside a callback deadlocks on
+  the state `RefCell` (see below), so `app::run` is a loop over *phases*: each lock epoch is one
+  `run_full_phase` with its own `Inner` and its own `glib::MainLoop`, each minimized period is one
+  `chip::run_phase`, and the unlock, the `ACTIVE_LOCK` teardown and the window destruction happen in
+  straight-line code in `run` between them. Everything per-phase resets for free — the quiet period
+  and its cap, held keys, `shown_settled`, the surfaces, the 2s zero-output timer — and each epoch
+  gets a fresh `gtk4_session_lock::Instance`. Relocking in one process is not documented upstream
+  but works; see `issues/gtk4-session-lock-warts.md`.
+- A phase records its outcome and sets an `over` flag it never clears, so a callback that runs after
+  the outcome has been taken out (window teardown fires `destroy`) cannot resurrect the phase.
+- What must outlive a phase lives in `app::Ui` (the config and the response buffer) rather than in
+  `Inner`, so a response typed before minimizing is still in the box when the prompt expands again.
+  The chip phase is handed the config alone: it has no response box and no way to reach that one.
+- The signal poll is its own 50ms timer rather than a branch of the settle timer, since the chip
+  phase has no settle timer. A phase consumes the flag only while it is live, so a signal cannot be
+  swallowed by an outgoing phase during a handover.
 - Every survivable exit path unlocks *and* waits for the compositor to process it before tearing
   anything down — approval before the exec, denial, the settle cap, the three signals, and every
   operational error after `lock()`. The unlock happens once in `app::run`, outside every callback:
@@ -528,14 +586,19 @@ the *real* gate parser and interpreter whitelist with the shim's own output, so 
 drift apart.
 
 The GUI harness never hardcodes layout or tuned sleeps — both broke on unrelated UI changes. The
-prompt logs, at debug level, `geometry: <approve|deny|prominent|response> X Y W H`
+prompt logs, at debug level, `geometry: <approve|deny|minimize|prominent|response> X Y W H`
 (window-relative, logged at presentation) and `controls <live|settling>` on every settle
-transition; the script derives its click and drag targets from the geometry lines and waits on log markers (`controls live`,
-`surface presented`, `monitor removed`, `session locked`/`unlocked` from a debug-logged
-`permission-prompt`) instead of sleeping. Change the dialog freely; only renaming those log lines
-or the behaviour itself breaks the suite. The suite's `click <name>` helper nudges the pointer off a
-control and back before pressing it, because a control that becomes sensitive under a pointer that
-never moved does not get the next click at all —
+transition; the chip logs `geometry: <chip|chip-body|chip-cancel> X Y W H` in *output* coordinates
+instead, because it is a small window in a corner rather than a surface filling the output. The
+script derives its click and drag targets from the geometry lines and waits on log markers
+(`controls live`, `surface presented`, `minimized`, `chip presented`, `expanded`, `monitor removed`,
+`session locked`/`unlocked` from a debug-logged `permission-prompt`) instead of sleeping. It also
+scopes its `kill` to gates whose `/proc/PID/environ` names this session's directory: a bare
+`pkill -x sudo-prompt` also kills a gate another agent is driving in a different guibox session,
+which shows up as unrelated tests failing with "signal 15". Change the dialog freely; only renaming
+those log lines or the behaviour itself breaks the suite. The suite's `click <name>` helper nudges
+the pointer off a control and back before pressing it, because a control that becomes sensitive
+under a pointer that never moved does not get the next click at all —
 `issues/stale-pointer-focus-when-controls-go-live.md`.
 (The old fixed sleeps flaked about one run in six on the
 hotplug checks — the `sleep 2` after `create_output` could return before the second lock surface
