@@ -113,8 +113,9 @@ it on any exit including SIGKILL. There is no PID file and no stale-lock handlin
 
 ## Reading the decision
 
-One escaped record per decision on stderr via `env_logger`, and best-effort to the systemd journal
-(`SYSLOG_IDENTIFIER=sudo-prompt`), silently skipped when the socket is absent:
+One escaped record per decision, best-effort to the systemd journal (`SYSLOG_IDENTIFIER=sudo-prompt`,
+silently skipped when the socket is absent) and on stderr via `env_logger` — the record is `info`
+and the default filter is `warn`, so stderr shows it only under `RUST_LOG=info`:
 
 ~~~
 approve: uid=1006 user=ai display=wayland-1 command=/usr/bin/rm -rf '/tmp/a b'
