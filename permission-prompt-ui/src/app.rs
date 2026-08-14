@@ -12,6 +12,7 @@ use gtk::prelude::*;
 
 use crate::dialog::{self, Dialog, DialogSpec};
 use crate::settle::{Settle, SettleState};
+use crate::text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurfaceMode {
@@ -45,6 +46,23 @@ pub enum Verdict {
     Error(String),
 }
 
+/// What the run came back with: the verdict, and whatever the human typed in the response box.
+#[derive(Debug)]
+pub struct Answer {
+    pub verdict: Verdict,
+    /// Only ever set for [`Verdict::Approved`] and [`Verdict::Denied`]: a settle cap, a signal or
+    /// an error was not a human answering, and a half-typed sentence printed under one of those
+    /// would be attributed to a decision nobody made.
+    pub response: Option<String>,
+}
+
+impl Answer {
+    /// An outcome with nothing typed, or one the response does not belong to.
+    fn bare(verdict: Verdict) -> Self {
+        Answer { verdict, response: None }
+    }
+}
+
 pub struct PromptConfig {
     pub spec: DialogSpec,
     pub mode: SurfaceMode,
@@ -53,6 +71,13 @@ pub struct PromptConfig {
     /// True for the gate: a session lock that cannot be taken is a denial, never a downgrade to a
     /// weaker surface.
     pub lock_required: bool,
+}
+
+/// Everything that outlives one set of surfaces. The response buffer lives here rather than in
+/// [`Inner`] so every output's entry shares it, and so it survives a rebuild of the windows.
+struct Ui {
+    cfg: PromptConfig,
+    response: Option<text::ResponseBuffer>,
 }
 
 thread_local! {
@@ -146,11 +171,14 @@ impl Inner {
 
 type State = Rc<RefCell<Inner>>;
 
-pub fn run(cfg: PromptConfig) -> Verdict {
+pub fn run(cfg: PromptConfig) -> Answer {
     install_css();
-    let cfg = Rc::new(cfg);
+    let ui = Rc::new(Ui {
+        response: cfg.spec.response.then(text::ResponseBuffer::new),
+        cfg,
+    });
     let state: State = Rc::new(RefCell::new(Inner {
-        settle: Settle::new(cfg.settle, cfg.cap),
+        settle: Settle::new(ui.cfg.settle, ui.cfg.cap),
         shown_settled: None,
         windows: Vec::new(),
         held: HashSet::new(),
@@ -164,25 +192,25 @@ pub fn run(cfg: PromptConfig) -> Verdict {
     install_signal_handlers();
     install_settle_timer(&state);
 
-    match cfg.mode {
+    match ui.cfg.mode {
         SurfaceMode::SessionLock => {
-            if let Err(e) = start_session_lock(&cfg, &state) {
+            if let Err(e) = start_session_lock(&ui, &state) {
                 // `failed` can arrive before `lock()` returns, and its message is the more
                 // specific one.
                 let recorded = state.borrow_mut().verdict.take();
                 unlock_and_sync();
-                return recorded.unwrap_or(Verdict::Error(e));
+                return Answer::bare(recorded.unwrap_or(Verdict::Error(e)));
             }
         }
         SurfaceMode::Layer => {
-            if let Err(e) = start_layer(&cfg, &state) {
-                return Verdict::Error(e);
+            if let Err(e) = start_layer(&ui, &state) {
+                return Answer::bare(Verdict::Error(e));
             }
         }
-        SurfaceMode::Toplevel => start_toplevel(&cfg, &state),
+        SurfaceMode::Toplevel => start_toplevel(&ui, &state),
         SurfaceMode::Auto => {
-            if start_session_lock(&cfg, &state).is_err() {
-                fall_back(&cfg, &state);
+            if start_session_lock(&ui, &state).is_err() {
+                fall_back(&ui, &state);
             }
         }
     }
@@ -203,8 +231,18 @@ pub fn run(cfg: PromptConfig) -> Verdict {
         }
     });
 
-    let verdict = state.borrow_mut().verdict.take();
-    verdict.unwrap_or_else(|| Verdict::Error("prompt exited without a decision".to_string()))
+    let verdict = state
+        .borrow_mut()
+        .verdict
+        .take()
+        .unwrap_or_else(|| Verdict::Error("prompt exited without a decision".to_string()));
+    // Read once here rather than at the verdict: `finish` quits the loop, so nothing can be typed
+    // between the two, and this keeps the buffer out of the state every callback borrows.
+    let response = match verdict {
+        Verdict::Approved | Verdict::Denied => ui.response.as_ref().and_then(|b| b.text()),
+        _ => None,
+    };
+    Answer { verdict, response }
 }
 
 fn install_css() {
@@ -277,12 +315,12 @@ fn install_settle_timer(state: &State) {
     });
 }
 
-fn new_window(cfg: &Rc<PromptConfig>, state: &State) -> (gtk::Window, Rc<Dialog>) {
+fn new_window(ui: &Rc<Ui>, state: &State) -> (gtk::Window, Rc<Dialog>) {
     let window = gtk::Window::new();
     window.add_css_class("pp-window");
-    window.set_title(Some(cfg.spec.title));
+    window.set_title(Some(ui.cfg.spec.title));
 
-    let d = Rc::new(dialog::build(&cfg.spec));
+    let d = Rc::new(dialog::build(&ui.cfg.spec, ui.response.as_ref()));
     if let Some(shown) = state.borrow().shown_settled {
         d.set_settled(shown);
     }
@@ -331,6 +369,9 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed({
         let state = state.clone();
+        // Weak, so the controller the window owns does not own the window back.
+        let window = window.downgrade();
+        let response = d.response.clone();
         move |_, keyval, keycode, modifiers| {
             let mut st = state.borrow_mut();
             let now = Instant::now();
@@ -338,23 +379,38 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
             // known, so its autorepeats are never mistaken for a fresh press afterwards.
             let repeat = !st.held.insert(keycode);
             st.settle.input(now);
-            if st.settle.is_settled() && !repeat {
-                match keyval {
-                    gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => {
-                        st.finish(Verdict::Approved)
+            let answered = st.settle.is_settled() && !repeat;
+            // Enter and Escape keep their meaning while the human is typing: they are handled
+            // here, before the entry can see them, so a response is an annotation on the answer
+            // rather than a third answer.
+            match keyval {
+                gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => {
+                    if answered {
+                        st.finish(Verdict::Approved);
                     }
-                    gdk::Key::Escape => st.finish(Verdict::Denied),
-                    _ => {}
+                    return glib::Propagation::Stop;
                 }
+                gdk::Key::Escape => {
+                    if answered {
+                        st.finish(Verdict::Denied);
+                    }
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
             }
             if is_copy(keyval, modifiers) {
-                // The one combination allowed through to the focused widget. Only a label can
-                // hold focus — buttons set `can-focus` off — so this can copy text and nothing
-                // else; it cannot reach an activatable widget.
+                // Allowed through to the focused widget wherever the focus is: it can copy text
+                // and nothing else, since it cannot reach an activatable widget.
                 return glib::Propagation::Proceed;
             }
-            // Nothing else may turn a keystroke into an activation.
-            glib::Propagation::Stop
+            // Everything else reaches the response entry, and only the response entry. It can
+            // hold focus only once it is sensitive, which is only once the prompt has settled, so
+            // this cannot open a path to the keyboard before then.
+            match window.upgrade() {
+                Some(w) if focus_is_in(&w, response.as_ref()) => glib::Propagation::Proceed,
+                // Nothing else may turn a keystroke into an activation.
+                _ => glib::Propagation::Stop,
+            }
         }
     });
     keys.connect_key_released({
@@ -412,6 +468,20 @@ fn wire_input(window: &gtk::Window, d: &Rc<Dialog>, state: &State) {
             }
         }
     });
+}
+
+/// Is the window's focus the response entry, or something inside it? A `GtkEntry` puts the focus
+/// on its own inner text widget, so this walks up rather than comparing the two directly.
+fn focus_is_in(window: &gtk::Window, target: Option<&gtk::Widget>) -> bool {
+    let Some(target) = target else { return false };
+    let mut focused = gtk::prelude::GtkWindowExt::focus(window);
+    while let Some(w) = focused {
+        if &w == target {
+            return true;
+        }
+        focused = w.parent();
+    }
+    false
 }
 
 /// Leave nothing focused, once the toolkit has finished deciding what to focus. Deferred to an
@@ -474,6 +544,9 @@ fn log_geometry(window: &gtk::Window, d: &Dialog) {
     if let Some(p) = &d.prominent {
         one("prominent", p.upcast_ref());
     }
+    if let Some(r) = &d.response {
+        one("response", r);
+    }
 }
 
 /// The session lock library destroys a window when its monitor goes away or the lock ends.
@@ -489,7 +562,7 @@ fn wire_destroy(window: &gtk::Window, state: &State) {
     });
 }
 
-fn start_session_lock(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), String> {
+fn start_session_lock(ui: &Rc<Ui>, state: &State) -> Result<(), String> {
     // Costs a Wayland roundtrip on the first call, so ask once.
     if !gtk4_session_lock::is_supported() {
         return Err("compositor does not support ext-session-lock-v1".to_string());
@@ -498,11 +571,11 @@ fn start_session_lock(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), Strin
     let instance = gtk4_session_lock::Instance::new();
 
     instance.connect_monitor({
-        let cfg = cfg.clone();
+        let ui = ui.clone();
         let state = state.clone();
         move |inst, monitor| {
             log::debug!("lock surface for monitor {:?}", monitor.connector());
-            let (window, d) = new_window(&cfg, &state);
+            let (window, d) = new_window(&ui, &state);
             inst.assign_window_to_monitor(&window, monitor);
             let mut st = state.borrow_mut();
             if st.locked {
@@ -537,10 +610,10 @@ fn start_session_lock(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), Strin
     });
 
     instance.connect_failed({
-        let cfg = cfg.clone();
+        let ui = ui.clone();
         let state = state.clone();
         move |_| {
-            if cfg.lock_required {
+            if ui.cfg.lock_required {
                 // Normal cause: another client already holds the lock, i.e. the screen is
                 // locked. Not a fallback trigger — a downgrade would hand back the spoofing
                 // exposure session lock was chosen to remove.
@@ -549,9 +622,9 @@ fn start_session_lock(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), Strin
                     .finish(Verdict::Error("could not take the session lock".to_string()));
             } else if !state.borrow().fallback_done {
                 // Defer: `failed` can arrive before `lock()` returns.
-                let cfg = cfg.clone();
+                let ui = ui.clone();
                 let state = state.clone();
-                glib::idle_add_local_once(move || fall_back(&cfg, &state));
+                glib::idle_add_local_once(move || fall_back(&ui, &state));
             }
         }
     });
@@ -577,7 +650,7 @@ fn start_session_lock(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), Strin
     Ok(())
 }
 
-fn fall_back(cfg: &Rc<PromptConfig>, state: &State) {
+fn fall_back(ui: &Rc<Ui>, state: &State) {
     {
         let mut st = state.borrow_mut();
         if st.fallback_done || st.verdict.is_some() {
@@ -587,12 +660,12 @@ fn fall_back(cfg: &Rc<PromptConfig>, state: &State) {
     }
     ACTIVE_LOCK.with(|l| *l.borrow_mut() = None);
     log::info!("session lock unavailable; falling back");
-    if start_layer(cfg, state).is_err() {
-        start_toplevel(cfg, state);
+    if start_layer(ui, state).is_err() {
+        start_toplevel(ui, state);
     }
 }
 
-fn start_layer(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), String> {
+fn start_layer(ui: &Rc<Ui>, state: &State) -> Result<(), String> {
     if !gtk4_layer_shell::is_supported() {
         return Err("compositor does not support zwlr_layer_shell_v1".to_string());
     }
@@ -600,19 +673,19 @@ fn start_layer(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), String> {
     let monitors = display.monitors();
     for i in 0..monitors.n_items() {
         if let Some(monitor) = monitors.item(i).and_downcast::<gdk::Monitor>() {
-            add_layer_window(cfg, state, &monitor);
+            add_layer_window(ui, state, &monitor);
         }
     }
     if state.borrow().windows.is_empty() {
         return Err("no outputs to present the prompt on".to_string());
     }
     monitors.connect_items_changed({
-        let cfg = cfg.clone();
+        let ui = ui.clone();
         let state = state.clone();
         move |model, pos, _removed, added| {
             for i in pos..pos + added {
                 if let Some(monitor) = model.item(i).and_downcast::<gdk::Monitor>() {
-                    add_layer_window(&cfg, &state, &monitor);
+                    add_layer_window(&ui, &state, &monitor);
                 }
             }
         }
@@ -620,9 +693,9 @@ fn start_layer(cfg: &Rc<PromptConfig>, state: &State) -> Result<(), String> {
     Ok(())
 }
 
-fn add_layer_window(cfg: &Rc<PromptConfig>, state: &State, monitor: &gdk::Monitor) {
+fn add_layer_window(ui: &Rc<Ui>, state: &State, monitor: &gdk::Monitor) {
     use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-    let (window, d) = new_window(cfg, state);
+    let (window, d) = new_window(ui, state);
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("permission-prompt"));
@@ -657,8 +730,8 @@ fn watch_monitor(state: &State, monitor: &gdk::Monitor, window: &gtk::Window, de
     });
 }
 
-fn start_toplevel(cfg: &Rc<PromptConfig>, state: &State) {
-    let (window, d) = new_window(cfg, state);
+fn start_toplevel(ui: &Rc<Ui>, state: &State) {
+    let (window, d) = new_window(ui, state);
     window.set_default_size(720, 540);
     window.present();
     let state2 = state.clone();

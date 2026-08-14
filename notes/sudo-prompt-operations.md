@@ -119,8 +119,15 @@ and the default filter is `warn`, so stderr shows it only under `RUST_LOG=info`:
 
 ~~~
 approve: uid=1006 user=ai display=wayland-1 command=/usr/bin/rm -rf '/tmp/a b'
+deny: uid=1006 user=ai display=wayland-1 command=/usr/bin/rm -rf / response=not that one
 deny(settle-cap): uid=1000 user=… display=wayland-1 command=…
 ~~~
+
+`response=` is what the human typed in the prompt's response box, escaped like the command and
+absent when they typed nothing — "why was this denied" belongs in the audit trail too. It is last on
+the line because it is the field most likely to hold spaces the reader did not put there. In the
+journal record it is the `SUDO_PROMPT_RESPONSE` field, alongside `SUDO_PROMPT_OUTCOME`, `_UID`,
+`_USER`, `_DISPLAY` and `_COMMAND`, and is likewise omitted when empty.
 
 sudo's own logging already records the gate invocation; this record is the decision.
 

@@ -16,8 +16,12 @@ fn main() {
         .init();
 
     match gate::run() {
-        Fail::Denied => {
+        Fail::Denied { response } => {
+            // The denial message keeps its own line, byte for byte: callers grep for it.
             eprintln!("{DENIED_MESSAGE}");
+            if let Some(response) = &response {
+                eprintln!("{}", gate::response_line(response));
+            }
             std::process::exit(EXIT_FAILURE);
         }
         Fail::Error(msg) => {

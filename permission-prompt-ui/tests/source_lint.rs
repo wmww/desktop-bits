@@ -21,7 +21,15 @@ const RULES: &[Rule] = &[
         why: "caller text must never be interpreted as Pango markup or as a mnemonic",
     },
     Rule {
-        tokens: &["Label::new", "set_text(", "set_label(", "TextView", "gtk::Entry"],
+        tokens: &[
+            "Label::new",
+            "set_text(",
+            "set_label(",
+            "TextView",
+            "gtk::Entry",
+            "EntryBuffer",
+            "set_placeholder_text",
+        ],
         allowed_in: &["permission-prompt-ui/src/text.rs"],
         why: "only the audited text module may construct or write to a text widget",
     },

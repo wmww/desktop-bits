@@ -124,6 +124,10 @@ pub struct DialogSpec {
     pub fields: Vec<Field>,
     pub approve: &'static str,
     pub deny: &'static str,
+    /// Show a one-line box above the buttons for the human's own words. What they type comes back
+    /// beside the verdict (see [`crate::app::Answer`]); it is an annotation on the answer, never a
+    /// third answer.
+    pub response: bool,
 }
 
 /// One built dialog instance. Every output gets its own.
@@ -135,6 +139,9 @@ pub struct Dialog {
     /// log lines (see `app::log_geometry`) can name it; the GUI tests derive drag targets from
     /// those lines instead of hardcoding layout.
     pub prominent: Option<gtk::Label>,
+    /// The response box, when the spec asked for one. Held as a plain widget: reading it goes
+    /// through the shared buffer, so all this reference does is enable, disable and locate it.
+    pub response: Option<gtk::Widget>,
 }
 
 impl Dialog {
@@ -144,10 +151,21 @@ impl Dialog {
     pub fn set_settled(&self, settled: bool) {
         self.approve.set_sensitive(settled);
         self.deny.set_sensitive(settled);
+        // An insensitive entry cannot take focus, so nothing can be typed before the prompt is
+        // live — which is what keeps typing from ever reaching the settle cap.
+        if let Some(r) = &self.response {
+            r.set_sensitive(settled);
+        }
     }
 }
 
-pub fn build(spec: &DialogSpec) -> Dialog {
+/// Placeholder in the response box. Not an invitation to type a secret, and short enough to leave
+/// the box reading as optional.
+const RESPONSE_PLACEHOLDER: &str = "Response";
+
+/// `response` is the buffer shared by every output's entry, and is `Some` exactly when
+/// `spec.response` is set — [`crate::app::run`] owns the one buffer and derives this from the spec.
+pub fn build(spec: &DialogSpec, response: Option<&text::ResponseBuffer>) -> Dialog {
     let dialog = gtk::Box::new(gtk::Orientation::Vertical, 12);
     dialog.add_css_class("pp-dialog");
     dialog.add_css_class(match spec.style {
@@ -176,6 +194,12 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     }
     dialog.append(&fields);
 
+    let response = response.map(|buffer| {
+        let e = text::entry(buffer, RESPONSE_PLACEHOLDER);
+        dialog.append(&e);
+        e
+    });
+
     let deny = text::button(spec.deny, &["pp-deny"]);
     let approve = text::button(spec.approve, &["pp-approve"]);
 
@@ -189,7 +213,7 @@ pub fn build(spec: &DialogSpec) -> Dialog {
     bottom.append(&approve);
     dialog.append(&bottom);
 
-    let d = Dialog { root: dialog.upcast(), approve, deny, prominent };
+    let d = Dialog { root: dialog.upcast(), approve, deny, prominent, response };
     d.set_settled(false);
     d
 }

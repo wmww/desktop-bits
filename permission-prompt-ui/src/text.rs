@@ -115,3 +115,54 @@ pub fn button(text: &'static str, classes: &[&str]) -> gtk::Button {
     }
     b
 }
+
+/// Ceiling on the response, in characters. A response is a sentence; the ceiling only has to stop
+/// a paste from putting something unbounded into a log record and onto the caller's stderr. Kept
+/// below [`crate::untrusted::MAX_TOKEN_CHARS`], so what is printed is never clipped as well.
+const MAX_RESPONSE_CHARS: u16 = 1024;
+
+/// The backing store of the response entry, shared by every output's copy of the dialog so the
+/// text stays in sync across outputs and survives a window being rebuilt.
+///
+/// A newtype rather than the buffer itself, so the entry APIs stay inside this module — which is
+/// what the source lint checks.
+#[derive(Clone)]
+pub struct ResponseBuffer(gtk::EntryBuffer);
+
+impl ResponseBuffer {
+    pub fn new() -> Self {
+        let b = gtk::EntryBuffer::new(None::<&str>);
+        b.set_max_length(Some(MAX_RESPONSE_CHARS));
+        ResponseBuffer(b)
+    }
+
+    /// What the human typed, or `None` if they typed nothing. Not trimmed and not otherwise
+    /// touched: it is their sentence, and "empty" means literally empty.
+    pub fn text(&self) -> Option<String> {
+        let text = self.0.text().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+impl Default for ResponseBuffer {
+    fn default() -> Self {
+        ResponseBuffer::new()
+    }
+}
+
+/// The response box: one line the human may type into, sitting above the buttons.
+///
+/// The only text widget here whose content is neither compiled in nor escaped caller data — it is
+/// the human's own, typed on the trusted surface. An entry renders its text literally, so there is
+/// no markup to turn off; it is built here anyway because one audited module makes text widgets.
+///
+/// It cannot answer the prompt: the input state machine handles Enter and Escape in the capture
+/// phase before the entry sees them, and `activates-default` is off besides.
+pub fn entry(buffer: &ResponseBuffer, placeholder: &'static str) -> gtk::Widget {
+    let e = gtk::Entry::with_buffer(&buffer.0);
+    e.set_placeholder_text(Some(placeholder));
+    e.set_activates_default(false);
+    e.set_hexpand(true);
+    e.update_property(&[gtk::accessible::Property::Label(placeholder)]);
+    e.upcast()
+}

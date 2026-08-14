@@ -117,6 +117,9 @@ pub fn build(
             fields,
             approve: APPROVE,
             deny: DENY,
+            // Always: the gate has no options, and a caller-visible flag for this would be a
+            // caller-controlled one.
+            response: true,
         },
         command_log,
     }
@@ -331,6 +334,13 @@ mod tests {
         assert!(w.lines.iter().any(|l| l.as_str().contains("as another user")));
         // The path stays in the command field with the rest of the argv.
         assert_eq!(command(&r).lines[0].as_str(), "/usr/bin/sudo -u ff id");
+    }
+
+    /// The gate always offers the box: it has no options, and a flag for this would be one the
+    /// requester controls.
+    #[test]
+    fn the_gate_always_offers_a_response_box() {
+        assert!(render(&["--", "/usr/bin/ls"]).spec.response);
     }
 
     #[test]

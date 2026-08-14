@@ -43,6 +43,11 @@ struct Args {
     #[arg(long = "detail")]
     details: Vec<String>,
 
+    /// Offer a one-line box for a response to carry back to the caller. Off by default: what it
+    /// prints is a change to this binary's output contract.
+    #[arg(long)]
+    response: bool,
+
     /// Surface to present on. `auto` tries session lock, then layer shell, then an xdg toplevel.
     #[arg(long, default_value = "auto")]
     surface: String,
@@ -74,7 +79,7 @@ fn main() {
     // window than that failure mode should pass --surface=toplevel.
     permission_prompt_ui::install_panic_hook();
 
-    let verdict = permission_prompt_ui::run(PromptConfig {
+    let answer = permission_prompt_ui::run(PromptConfig {
         spec: spec(&args),
         mode,
         settle: SETTLE,
@@ -84,8 +89,13 @@ fn main() {
         lock_required: false,
     });
 
-    log::info!("verdict: {verdict:?}");
-    std::process::exit(match verdict {
+    log::info!("verdict: {:?}", answer.verdict);
+    // Only an answer carries a response, so no outcome check is needed here. Escaped: this is a
+    // line the caller parses, and one line in has to be one line out.
+    if let Some(response) = &answer.response {
+        eprintln!("User response: {}", escape(response).as_str());
+    }
+    std::process::exit(match answer.verdict {
         Verdict::Approved => EXIT_APPROVED,
         Verdict::Denied | Verdict::DeniedSettleCap | Verdict::DeniedSignal(_) => EXIT_DENIED,
         Verdict::Error(e) => {
@@ -123,6 +133,7 @@ fn spec(args: &Args) -> DialogSpec {
         fields,
         approve: APPROVE,
         deny: DENY,
+        response: args.response,
     }
 }
 
@@ -134,4 +145,20 @@ fn escape(s: &str) -> Escaped {
 /// caller is writing prose rather than argv tokens.
 fn lines(s: &str) -> Vec<Escaped> {
     s.split('\n').map(escape).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(argv: &[&str]) -> Args {
+        Args::parse_from(std::iter::once("permission-prompt").chain(argv.iter().copied()))
+    }
+
+    /// Opt-in: without the flag this binary's output is byte for byte what it always was.
+    #[test]
+    fn the_response_box_is_off_unless_asked_for() {
+        assert!(!spec(&args(&["--title", "x"])).response);
+        assert!(spec(&args(&["--title", "x", "--response"])).response);
+    }
 }

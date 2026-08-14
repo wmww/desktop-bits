@@ -12,7 +12,7 @@ sudo-prompt/            the sole sudo gate (lib + bin, so tests can drive its pa
 sudo-prompt/verify.sh   read-only check of a deployed setup (setup itself is manual, see README)
 sudo-shim/              /usr/local/bin/sudo, an unprivileged dispatcher (lib + bin)
 permission-prompt/      generic yes/no presenter, unprivileged, execution-free
-tests/gui-test.sh       23 behavioural checks in a nested sway
+tests/gui-test.sh       34 behavioural checks in a nested sway
 ~~~
 
 ## Goal and threat model
@@ -30,9 +30,17 @@ human did not type. The requesting uid is a first-class trusted field for that r
 is a conventional group: `usermod -aG wheel` now grants gate access as a side effect.
 
 Every uid can make ordinary windows (wlbouncer grants `xdg_wm_base` to all). It denies
-virtual-keyboard, input-method and virtual-pointer to every non-root uid, and the gate creates no IM
-context, so approval cannot be forged by synthesizing input — only by tricking the human's own
-press. XWayland clients can inject input only to other X clients.
+virtual-keyboard, input-method and virtual-pointer to every non-root uid, so approval cannot be
+forged by synthesizing input — only by tricking the human's own press. XWayland clients can inject
+input only to other X clients.
+
+The response entry does create a `GtkIMContext`, which an earlier version of this note cited as
+absent. Still sound, for three reasons rather than one: that context lives on the *gate's own*
+root-authenticated Wayland connection, so an attacker's uid cannot bind an input method to it; a
+denied global means no non-root client has an input method to commit through in the first place;
+and an IM commits *text*, never key events, so even a commit could only fill the response box.
+Approval still requires a fresh physical key press or pointer press delivered by the compositor and
+read in the capture phase before any widget sees it.
 
 The gate presents on `ext-session-lock-v1`, which the compositor renders above every other client
 and routes all input to, so the layer-shell spoofing of `issues/overlay-layer-spoofing.md` cannot
@@ -57,7 +65,10 @@ between approval and exec.
 
 - `permission-prompt` is a generic yes/no presenter. It never executes a command, gets no sudoers
   entry, and is **not** an authorization boundary. Its caller owns its prose and reads its exit
-  status. An unprivileged caller can spoof its own request, which grants nothing.
+  status. An unprivileged caller can spoof its own request, which grants nothing. `--response` adds
+  the response box (off by default, since what it prints changes this binary's output contract);
+  with it, a non-empty response prints as `User response: <text>` on stderr on approval and on
+  denial alike, and nothing prints on a cap, signal or error exit.
 - `sudo-prompt` is the sole sudo gate, with a fixed presentation and no UI, surface, display,
   timing, lock, theme or config options at all.
 
@@ -134,6 +145,15 @@ basename, and any token before `--`.
 Exit status: approval exec()s, so the command's own status or signal is the result. Denial exits 125
 with exactly `User denied sudo :(`. Every operational error exits 125 with a message naming the
 failed check. (A command that itself exits 125 is indistinguishable; stderr disambiguates.)
+
+stderr also carries the response, when the human typed one: `User response: <text>` on its own line,
+after the denial message on a denial and immediately *before* the exec on an approval, which is what
+guarantees it precedes anything the command writes. The denial message keeps its own line byte for
+byte — callers grep for it. Nothing prints when the box was empty, so the output of a request nobody
+annotated is what it always was, and nothing prints for a settle cap, a signal or an error, none of
+which was a human answering. The text is escaped through the same `Escaped::of` path as the command
+before it is printed or logged: one line in, one line out, whatever is in the box. The exit status is
+unchanged in every case — the response is an annotation on the answer, not a third answer.
 
 Order of operations: cwd → euid check → parse → flock → capture and scrub the environment →
 provenance → display selection → GTK init → build the command environment → prompt → unlock →
@@ -282,8 +302,8 @@ price of the shape.
 
 The prompt carries only what the decision needs. The gate is, top to bottom: the command, in the
 accent colour and larger than anything else; the interpreter warning when there is one; one flat
-line reading `user | cwd`; and an `env` gutter row when the request has one. No icon, no heading
-and no subtitle — the
+line reading `user | cwd`; an `env` gutter row when the request has one; and the response box. No
+icon, no heading and no subtitle — the
 command *is* the question, and a sentence asking it in the gate's own words would only push the
 answer further down. The buttons ("Run as root" / "Cancel") say what the heading used to.
 
@@ -306,9 +326,26 @@ or every prompt would come up showing a selection nobody made. Ctrl+C and Ctrl+I
 keys the input state machine lets through to the focused widget; nothing else there is focusable, so
 they can copy text and cannot reach anything activatable.
 
-The quiet period shows as greyed-out buttons and nothing else — no status line, and nothing that
-appears or disappears: a widget that stopped taking space would move the buttons at the instant they
-go live, and the pointer could end up over the *other* one.
+The response box is one full-width `GtkEntry` above the buttons, placeholder "Response", empty by
+default and ignorable. The gate always has it; the point is agents — "next time do it this other
+way" plus an accept or a deny is a channel the exit status alone cannot carry — and the gate has no
+options, so a flag for it would be a caller-controlled one. It is *disclosure to the requester*: the
+text goes back to whoever asked, so the placeholder is a bland "Response" rather than anything that
+invites a secret. It is also the one text widget in the workspace whose content is neither compiled
+in nor escaped caller data; it is the human's own, typed on the trusted surface, and it is escaped
+on the way *out* instead.
+
+One `GtkEntryBuffer` is shared by every output's entry, so the text follows the reader between
+screens, capped at 1024 characters — a response is a sentence, and the cap only has to keep a paste
+from putting something unbounded into a log record and onto the caller's stderr. GTK does **not**
+strip newlines from text pasted into a single-line entry (checked, not assumed): a pasted newline
+stays in the buffer and renders as a control glyph on the one visible line. Nothing is hidden by
+that, and the printed line stays one line because `Escaped::of` turns it into `\x0a` — that
+guarantee is ours, not the toolkit's.
+
+The quiet period shows as greyed-out controls — the buttons and the entry — and nothing else: no
+status line, and nothing that appears or disappears, since a widget that stopped taking space would
+move the buttons at the instant they go live, and the pointer could end up over the *other* one.
 
 ### Layout under pressure
 
@@ -412,9 +449,20 @@ many arguments it has, and dropping it would leave the field empty.
   contradicts its own explicit "never on an input event". The explicit rule is what is implemented.)
 - Approval needs a fresh physical key *down* on `Return`/`KP_Enter`/`ISO_Enter`, or a pointer press
   delivered after settling. Escape denies. Held keycodes are tracked so a client-side autorepeat is
-  never a fresh press, and the set is cleared on focus loss. The key controller stops every event in
-  the capture phase except Ctrl+C/Ctrl+Insert, which copies from the focused label; buttons set
-  `can-focus` off, so text is the only thing focus can reach. No default action, no IM context.
+  never a fresh press, and the set is cleared on focus loss.
+- The key controller runs in the capture phase, before any widget, and its rule is: track the key
+  and feed the settle machinery always; handle Enter and Escape itself and **stop** them, settled or
+  not, so they keep their meaning while the human is typing and the entry never sees an `activate`;
+  let Ctrl+C/Ctrl+Insert through to copy from the focused label; let anything else through only when
+  the window's focus is inside the response entry, and stop it otherwise. Buttons set `can-focus`
+  off, so focus can only ever be on a label or in the entry, and no key can reach anything
+  activatable. There is no default action.
+- Typing therefore cannot reach the settle cap: the entry is insensitive until settled, an
+  insensitive widget cannot take focus, and `Settle::input` is a no-op once settled. Nothing is
+  focused on map or on refocus (`drop_focus`), so the human clicks the entry to type; a refocused
+  window un-settles and briefly disables it, and the buffer keeps the text. Tab out of the entry
+  moves focus to a label and typing goes back to being swallowed, which is harmless — Enter and
+  Escape are global either way.
 
 ### Session lock discipline
 
@@ -480,12 +528,16 @@ the *real* gate parser and interpreter whitelist with the shim's own output, so 
 drift apart.
 
 The GUI harness never hardcodes layout or tuned sleeps — both broke on unrelated UI changes. The
-prompt logs, at debug level, `geometry: <approve|deny|prominent> X Y W H` (window-relative, logged
-at presentation) and `controls <live|settling>` on every settle transition; the script derives its
-click and drag targets from the geometry lines and waits on log markers (`controls live`,
+prompt logs, at debug level, `geometry: <approve|deny|prominent|response> X Y W H`
+(window-relative, logged at presentation) and `controls <live|settling>` on every settle
+transition; the script derives its click and drag targets from the geometry lines and waits on log markers (`controls live`,
 `surface presented`, `monitor removed`, `session locked`/`unlocked` from a debug-logged
 `permission-prompt`) instead of sleeping. Change the dialog freely; only renaming those log lines
-or the behaviour itself breaks the suite. (The old fixed sleeps flaked about one run in six on the
+or the behaviour itself breaks the suite. The suite's `click <name>` helper nudges the pointer off a
+control and back before pressing it, because a control that becomes sensitive under a pointer that
+never moved does not get the next click at all —
+`issues/stale-pointer-focus-when-controls-go-live.md`.
+(The old fixed sleeps flaked about one run in six on the
 hotplug checks — the `sleep 2` after `create_output` could return before the second lock surface
 was up, so the unplug raced the plug and could tear down the prompt's only surface.)
 

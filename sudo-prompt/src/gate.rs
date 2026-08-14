@@ -2,7 +2,9 @@
 
 use std::ffi::OsString;
 
-use permission_prompt_ui::{PromptConfig, SurfaceMode, Verdict, SETTLE, SETTLE_CAP};
+use permission_prompt_ui::{
+    Answer, Escaped, PromptConfig, SurfaceMode, Untrusted, Verdict, SETTLE, SETTLE_CAP,
+};
 
 use crate::cmdenv::Provenance;
 use crate::envsetup::Captured;
@@ -11,13 +13,23 @@ use crate::{cli, cmdenv, config, display, envsetup, exec, interp, journal, lockf
 /// The one sentence a denial prints. Kept exact: callers grep for it.
 pub const DENIED_MESSAGE: &str = "User denied sudo :(";
 
+/// What a typed response prints, on stderr, on its own line: after [`DENIED_MESSAGE`] on a denial,
+/// and before the exec on an approval, so it always precedes the command's own output.
+///
+/// Escaped through the same path as the command, because this line is a protocol an agent reads: a
+/// control byte in it must not be able to fake a second line or steer the requester's terminal.
+/// One line in, one line out, always.
+pub fn response_line(response: &str) -> String {
+    format!("User response: {}", Escaped::of(&Untrusted::from_bytes(response.as_bytes())).as_str())
+}
+
 /// Denial, and every operational error, exit 125. On approval the gate exec()s, so the command's
 /// own status or signal is the result.
 pub const EXIT_FAILURE: i32 = 125;
 
 pub enum Fail {
-    /// The human said no.
-    Denied,
+    /// The human said no, carrying whatever they typed in the response box.
+    Denied { response: Option<String> },
     /// A named check failed, or the prompt could not be trusted to have been answered.
     Error(String),
 }
@@ -84,7 +96,7 @@ pub fn run() -> Fail {
 
     // The prompt unlocks the session and waits for the compositor to process it before returning,
     // on every path including the settle cap and the signal handlers.
-    let verdict = permission_prompt_ui::run(PromptConfig {
+    let answer = permission_prompt_ui::run(PromptConfig {
         spec: rendered.spec,
         mode: SurfaceMode::SessionLock,
         settle: SETTLE,
@@ -92,9 +104,9 @@ pub fn run() -> Fail {
         lock_required: true,
     });
 
-    log_decision(&provenance, &selected.name, &rendered.command_log, &verdict);
+    log_decision(&provenance, &selected.name, &rendered.command_log, &answer);
 
-    match verdict {
+    match answer.verdict {
         Verdict::Approved => {
             // Resolve against the PATH of the *final* environment: the request's `PATH=`
             // assignment if it carried one — which the prompt showed — else the gate's own
@@ -106,11 +118,15 @@ pub fn run() -> Fail {
             };
             let mut command_argv = vec![req.command.clone()];
             command_argv.extend(req.args.iter().cloned());
+            // Before the exec, which is what makes it precede anything the command writes.
+            if let Some(response) = &answer.response {
+                eprintln!("{}", response_line(response));
+            }
             exec::tighten_fds(Some(selected.fd));
             // Only reached if the exec failed. Execution failure is an error, not approval.
             Fail::Error(exec::exec(&resolved, &command_argv, &env.to_envp()))
         }
-        Verdict::Denied => Fail::Denied,
+        Verdict::Denied => Fail::Denied { response: answer.response },
         Verdict::DeniedSettleCap => Fail::Error(
             "input kept arriving; the prompt never settled, so nothing was approved".to_string(),
         ),
@@ -152,37 +168,60 @@ fn parse_id(value: Option<&[u8]>, name: &str) -> Result<u32, String> {
 }
 
 /// One escaped record per decision. One line, no chatter.
-fn log_decision(prov: &Provenance, display: &str, command: &str, verdict: &Verdict) {
-    let outcome = match verdict {
+fn log_decision(prov: &Provenance, display: &str, command: &str, answer: &Answer) {
+    // Escaped like the command, and last on the line because it is the one field that can hold
+    // spaces the reader did not put there. "Why was this denied" belongs in the audit trail.
+    let response = answer
+        .response
+        .as_ref()
+        .map(|r| Escaped::of(&Untrusted::from_bytes(r.as_bytes())).as_str().to_string());
+    let outcome = match &answer.verdict {
         Verdict::Approved => "approve",
         Verdict::Denied => "deny",
         Verdict::DeniedSettleCap => "deny(settle-cap)",
         Verdict::DeniedSignal(sig) => {
-            return log_record(prov, display, command, &format!("deny(signal {sig})"))
+            return log_record(prov, display, command, &format!("deny(signal {sig})"), None)
         }
         Verdict::Error(_) => "error",
     };
-    log_record(prov, display, command, outcome)
+    log_record(prov, display, command, outcome, response.as_deref())
 }
 
-fn log_record(prov: &Provenance, display: &str, command: &str, outcome: &str) {
+fn log_record(
+    prov: &Provenance,
+    display: &str,
+    command: &str,
+    outcome: &str,
+    response: Option<&str>,
+) {
     let user = String::from_utf8_lossy(&prov.user).to_string();
     log::info!(
-        "{outcome}: uid={} user={} display={} command={}",
+        "{outcome}: uid={} user={} display={} command={}{}",
         prov.uid,
         user,
         display,
-        command
+        command,
+        match response {
+            Some(r) => format!(" response={r}"),
+            None => String::new(),
+        }
     );
-    journal::send(&[
-        ("MESSAGE", &format!("sudo-prompt {outcome}: {command}")),
+    let uid = prov.uid.to_string();
+    let message = format!("sudo-prompt {outcome}: {command}");
+    let mut fields: Vec<(&str, &str)> = vec![
+        ("MESSAGE", &message),
         ("SUDO_PROMPT_OUTCOME", outcome),
-        ("SUDO_PROMPT_UID", &prov.uid.to_string()),
+        ("SUDO_PROMPT_UID", &uid),
         ("SUDO_PROMPT_USER", &user),
         ("SUDO_PROMPT_DISPLAY", display),
         ("SUDO_PROMPT_COMMAND", command),
         ("SYSLOG_IDENTIFIER", "sudo-prompt"),
-    ]);
+    ];
+    // Omitted rather than sent empty: an absent field says "nothing was typed" as clearly.
+    if let Some(r) = response {
+        fields.push(("SUDO_PROMPT_RESPONSE", r));
+    }
+    journal::send(&fields);
 }
 
 #[cfg(test)]
@@ -235,6 +274,22 @@ mod tests {
         let err = provenance(&cap(Some(&uid.to_string()), Some("1"), Some("definitely-not-me")))
             .unwrap_err();
         assert!(err.contains("inconsistent provenance"), "{err}");
+    }
+
+    /// The response line is a protocol: whatever the human typed, it prints as one line, and a
+    /// control byte in it comes out as an escape rather than as a second line or a terminal
+    /// escape sequence.
+    #[test]
+    fn a_response_always_prints_as_one_escaped_line() {
+        let plain = response_line("do it with -n next time");
+        assert_eq!(plain, "User response: do it with -n next time");
+        let odd = response_line("a\nb\r\x1b[31m");
+        assert_eq!(odd, "User response: a\\x0ab\\x0d\\x1b[31m");
+        assert_eq!(odd.lines().count(), 1);
+        // Not trimmed and not otherwise rewritten: it is the human's sentence.
+        assert_eq!(response_line("  spaced  "), "User response:   spaced  ");
+        // Non-ASCII prose stays readable.
+        assert_eq!(response_line("nästa gång"), "User response: nästa gång");
     }
 
     #[test]

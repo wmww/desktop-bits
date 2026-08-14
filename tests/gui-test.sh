@@ -111,6 +111,18 @@ left_edge() {
     echo "$((x + 2)) $((y + h / 2))"
 }
 
+# Click a control by name. The pointer is nudged off the target first: a control that becomes
+# sensitive under a pointer that never moved does not get the next click at all — see
+# issues/stale-pointer-focus-when-controls-go-live.md — and every test below is about something
+# else.
+click() {
+    local x y w h
+    read -r x y w h <<<"$(geom "$1")" || return 1
+    [[ -n ${h:-} ]] || { echo "no geometry for $1 in gate.log" >&2; return 1; }
+    wdotool mousemove "$((x + w / 2))" "$((y + h + 40))"
+    wdotool mousemove "$((x + w / 2))" "$((y + h / 2))" click 1
+}
+
 # --- the gate presents, and either verdict works -----------------------------
 launch /bin/echo denied-by-escape; settled
 wdotool key Escape
@@ -231,6 +243,102 @@ if command -v wl-paste >/dev/null; then
     wdotool key Escape; finished >/dev/null
 fi
 
+# --- the response box -------------------------------------------------------
+# Typed text rides back to the caller on stderr. On approval it must land before anything the
+# command itself writes, which is what printing it pre-exec buys.
+launch /bin/echo ran-after; settled
+click response
+wdotool type "use -n next time"
+click approve
+if finished && [[ $(status) == 0 ]] \
+   && [[ $(gatelog | grep -n "^User response: use -n next time$" | cut -d: -f1) -lt \
+         $(gatelog | grep -n "^ran-after$" | cut -d: -f1) ]]; then
+    ok "an approved response prints before the command's own output"
+else
+    bad "approved response" "status=$(status); $(gatelog | grep -E 'User response|ran-after')"
+fi
+
+launch /bin/echo should-not-run; settled
+click response
+wdotool type "not this one"
+wdotool key Escape
+if finished && [[ $(status) == 125 ]] \
+   && [[ $(gatelog | tail -2 | head -1) == "User denied sudo :(" ]] \
+   && [[ $(gatelog | tail -1) == "User response: not this one" ]]; then
+    ok "Escape while typing denies, with the response on the line after the denial"
+else
+    bad "denied response" "status=$(status); $(gatelog | tail -3 | tr '\n' '|')"
+fi
+
+launch /bin/echo enter-while-typing; settled
+click response
+wdotool type "typed then enter"
+wdotool key Return
+if finished && [[ $(status) == 0 ]] && gatelog | grep -q "^enter-while-typing$" \
+   && [[ $(gatelog | grep -c "^User response: typed then enter$") == 1 ]] \
+   && [[ $(gatelog | grep -c "verdict: Approved") == 1 ]]; then
+    ok "Enter reaches the prompt rather than the focused entry, and answers once"
+else
+    bad "enter while typing" "status=$(status); $(gatelog | grep -cE 'verdict:') verdicts"
+fi
+
+# Nothing typed: the output has to be what it was before the box existed.
+launch /bin/echo empty-box; settled
+click response
+wdotool key Return
+if finished && [[ $(status) == 0 ]] && ! gatelog | grep -q "User response:"; then
+    ok "an empty box adds nothing to an approval"
+else
+    bad "empty box approval" "status=$(status); $(gatelog | grep 'User response')"
+fi
+
+launch /bin/echo should-not-run; settled
+wdotool key Escape
+if finished && [[ $(status) == 125 ]] && [[ $(gatelog | tail -1) == "User denied sudo :(" ]]; then
+    ok "an empty box adds nothing to a denial"
+else
+    bad "empty box denial" "status=$(status); $(gatelog | tail -1)"
+fi
+
+# A pasted newline stays in the buffer — GTK does not strip it from a single-line entry — so what
+# keeps the printed line to one line is the escaping, and that is what this checks.
+if command -v wl-copy >/dev/null; then
+    printf 'first line\nsecond line\n' | wl-copy
+    launch /bin/echo pasted; settled
+    click response
+    wdotool key ctrl+v
+    # The one place a sleep is unavoidable: a clipboard transfer is a Wayland roundtrip with no
+    # marker in the log, and answering before it lands would test nothing.
+    sleep 0.5
+    wdotool key Return
+    if finished && [[ $(status) == 0 ]] \
+       && [[ $(gatelog | grep -c "^User response:") == 1 ]] \
+       && [[ $(gatelog | grep "^User response:") == 'User response: first line\x0asecond line\x0a' ]]
+    then
+        ok "a multi-line paste still prints as one escaped line"
+    else
+        bad "pasted response" "status=$(status); $(gatelog | grep 'User response')"
+    fi
+fi
+
+# The entry is insensitive until the controls are live, so it cannot take focus and typing at it
+# is swallowed like every other key — including for the settle cap, which this must not trip.
+launch /bin/echo late-typing; presented
+click response
+wdotool type "ghost"
+if settled && [[ -z $(status) ]]; then
+    click response
+    wdotool type "real"
+    wdotool key Return
+    if finished && [[ $(status) == 0 ]] && gatelog | grep -q "^User response: real$"; then
+        ok "the entry takes nothing before the controls are live"
+    else
+        bad "pre-settle typing" "status=$(status); $(gatelog | grep 'User response')"
+    fi
+else
+    bad "pre-settle typing" "prompt did not settle: status=$(status)"
+fi
+
 # --- the locks --------------------------------------------------------------
 # A second request queues on the flock instead of failing, and takes its turn when the first ends.
 launch /bin/echo first; settled
@@ -331,6 +439,51 @@ if [[ $(gatelog | grep -cE "^[0-9]+$") -le 4 ]]; then
 else
     bad "command fds" "$(gatelog | grep -E '^[0-9]+$' | tr '\n' ' ')"
 fi
+
+# --- the generic presenter's opt-in box -------------------------------------
+# Layer shell rather than a toplevel: it covers the output at 0,0, so the geometry lines are
+# screen coordinates here exactly as they are under the lock.
+launch_generic() {
+    rm -f "$GATE_LOG" "$GATE_STATUS"
+    local args="" a
+    for a in "$@"; do args+=" $(printf '%q' "$a")"; done
+    swaymsg exec "sh -c '$GENERIC --surface layer --verbose$args >$GATE_LOG 2>&1; \
+        echo \$? >$GATE_STATUS'" >/dev/null
+}
+
+watch generic
+launch_generic --title no-box --body "the default is no entry"
+if settled && ! gatelog | grep -q "geometry: response"; then
+    ok "permission-prompt has no response box without the flag"
+else
+    bad "generic default" "$(gatelog | grep geometry: | tr '\n' '|')"
+fi
+wdotool key Escape; finished >/dev/null
+
+launch_generic --response --title box --body "type something"
+settled
+click response
+wdotool type "allowed with a note"
+wdotool key Return
+if finished && [[ $(status) == 0 ]] && [[ $(gatelog | tail -1) == "User response: allowed with a note" ]]
+then
+    ok "permission-prompt --response carries the text out on approval"
+else
+    bad "generic approve" "status=$(status); $(gatelog | tail -1)"
+fi
+
+launch_generic --response --title box --body "type something"
+settled
+click response
+wdotool type "denied with a note"
+wdotool key Escape
+if finished && [[ $(status) == 1 ]] && [[ $(gatelog | tail -1) == "User response: denied with a note" ]]
+then
+    ok "permission-prompt --response carries the text out on denial too"
+else
+    bad "generic deny" "status=$(status); $(gatelog | tail -1)"
+fi
+watch gate
 
 # --- hotplug ----------------------------------------------------------------
 launch /bin/echo hotplug; settled
