@@ -489,6 +489,12 @@ or the behaviour itself breaks the suite. (The old fixed sleeps flaked about one
 hotplug checks — the `sleep 2` after `create_output` could return before the second lock surface
 was up, so the unplug raced the plug and could tear down the prompt's only surface.)
 
+Nothing in the suite may reach outside its own session. The SIGTERM check used to `pkill -x
+sudo-prompt`, which killed the gates of any *other* worktree running the suite at the same time and
+produced random "signal 15" denials in it; it now matches this checkout's binary and argv exactly
+(`pkill -x -f`, since a substring `-f` match also hits the `sh -c` wrapper that records the exit
+status).
+
 ## Out of scope, deliberately
 
 Remembered decisions and timestamps, tty fallback, any password-authenticated sudo path, PAM command

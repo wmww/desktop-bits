@@ -281,7 +281,10 @@ done
 
 # --- signals ----------------------------------------------------------------
 launch /bin/echo should-not-run; settled
-pkill -TERM -x sudo-prompt
+# Match this checkout's binary and this launch's argv exactly, not every `sudo-prompt` on the host:
+# a bare `-x sudo-prompt` also kills a second worktree running this suite, and a `-f` substring also
+# matches the `sh -c` wrapper that records the exit status.
+pkill -TERM -x -f "$GATE -- /bin/echo should-not-run"
 if finished && [[ $(status) == 125 ]] && gatelog | grep -q "signal 15"; then
     ok "SIGTERM denies"
 else
