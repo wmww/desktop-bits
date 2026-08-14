@@ -27,14 +27,14 @@ fn pen(area: &gtk::DrawingArea, cr: &cairo::Context) {
     cr.set_line_join(cairo::LineJoin::Miter);
 }
 
-/// A small rectangle in the lower right of the box: a picture of what the button does, drawn where
-/// the chip it produces will land.
+/// One stroke along the lower right of the box: the minimize underscore every window decoration
+/// draws, set in the corner the chip it produces will land in.
 pub fn minimize(area: &gtk::DrawingArea, cr: &cairo::Context, w: i32, h: i32) {
     pen(area, cr);
     let (w, h) = (w as f64, h as f64);
-    let x = snap(w * 0.42);
-    let y = snap(h * 0.5);
-    cr.rectangle(x, y, snap(w * 0.92) - x, snap(h * 0.92) - y);
+    let y = snap(h * 0.85);
+    cr.move_to(snap(w * 0.42), y);
+    cr.line_to(snap(w * 0.92), y);
     let _ = cr.stroke();
 }
 
