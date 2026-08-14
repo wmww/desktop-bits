@@ -35,6 +35,20 @@ Harmless — the client is on its way to exiting 125 — but it is noise on exac
 is most likely to be reading, and it suggests the failure teardown runs GTK window code against a
 surface that is no longer a toplevel.
 
+## Gtk-CRITICALs on the *successful* lock path too, on a real compositor
+
+Locking on the author's own sway logs four of these between "lock surface for monitor WL-1" and
+"session locked", i.e. while the window created in `monitor` is assigned but the lock is not up yet:
+
+~~~
+Gtk-CRITICAL: gtk_native_get_surface: assertion 'GTK_IS_NATIVE (self)' failed
+~~~
+
+Different assertion and different path from the failure-case CRITICALs above, and it does **not**
+reproduce in the nested headless sway the tests use — so it is invisible to `tests/gui-test.sh` and
+was only seen by running the gate against a live session. Nothing misbehaves: the lock comes up and
+the prompt is answerable. Not yet narrowed to which call in `assign`/`present` makes it.
+
 ## Relocking in one process works, but is undocumented
 
 The minimize chip unlocks the session and later locks it again from the same process, with a fresh

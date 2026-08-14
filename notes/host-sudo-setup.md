@@ -25,9 +25,11 @@ Wayland globals per uid. Key points for us:
   denied in the base set but **granted to `ff` and `comms`** (they need it for
   xdg-desktop-portal-wlr), so those two uids can read the gate's prompt off the screen. Reading is
   not approving, so the guarantee holds, but the prompt is not confidential from them.
-- `ext_session_lock_manager_v1` should be denied to every non-root uid (default-deny, but
-  **unverified** — check it isn't in the base set). A uid holding it can lock the session, which
-  blocks `sudo-prompt` entirely and puts an uncoverable surface on screen.
+- `ext_session_lock_manager_v1` is denied to non-root uids — **verified 2026-08-13**, as uid `ai`:
+  `WAYLAND_DISPLAY=wayland-root wayland-info` advertises neither it nor `zwlr_layer_shell_v1`. (Do
+  the check against `wayland-root`, the symlink to root's compositor. A uid's *own* nested sway on
+  `wayland-0` offers both, since wlbouncer is not filtering that one.) A uid holding it could lock
+  the session, which blocks `sudo-prompt` entirely and puts an uncoverable surface on screen.
 
 `sudo-prompt` covers the desktop with an `ext-session-lock-v1` surface (via `gtk4-session-lock`,
 which needs gtk4-layer-shell ≥ 1.2.0) rather than an `xdg_toplevel`, and has no fallback — not even
